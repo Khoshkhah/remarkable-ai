@@ -10,15 +10,54 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-SSH_HOST = "rm2"
+import os
+import sys
+import json
+import argparse
+import subprocess
+import tempfile
+from pathlib import Path
+
+CONFIG_FILE = os.path.expanduser("~/.config/remarkable-ai/config.json")
 REMOTE_PATH = "/home/root/.local/share/remarkable/xochitl"
 
-def run_ssh(cmd):
-    full_cmd = ["ssh", SSH_HOST, cmd]
+def load_config():
+    default_cfg = {
+        "active_device": "rm2",
+        "devices": {
+            "rm2": {"host": "rm2", "name": "reMarkable 2 (Primary)", "ip": "192.168.18.18"},
+            "rm-alt": {"host": "rm-alt", "name": "reMarkable 2 (Secondary)", "ip": ""}
+        }
+    }
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE) as f:
+                return {**default_cfg, **json.load(f)}
+        except Exception:
+            pass
+    return default_cfg
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+def get_active_host(override=None):
+    if override:
+        return override
+    cfg = load_config()
+    active = cfg.get("active_device", "rm2")
+    dev = cfg.get("devices", {}).get(active, {})
+    return dev.get("host", active)
+
+def run_ssh(cmd, host=None):
+    target = host or get_active_host()
+    full_cmd = ["ssh", target, cmd]
     res = subprocess.run(full_cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(f"SSH command failed: {res.stderr}")
+        raise RuntimeError(f"SSH command failed to '{target}': {res.stderr}")
     return res.stdout
+
 
 def list_notebooks():
     """Fetch all notebooks from reMarkable metadata."""
@@ -179,9 +218,33 @@ def analyze_with_ai(image_path, action="summarize", prompt=None):
     print(response.text)
     print("=" * 50 + "\n")
 
+def cmd_devices(args):
+    cfg = load_config()
+    if args.switch:
+        if args.switch in cfg["devices"]:
+            cfg["active_device"] = args.switch
+            save_config(cfg)
+            print(f"✅ Switched active reMarkable device to: '{args.switch}' ({cfg['devices'][args.switch]['name']})")
+        else:
+            print(f"❌ Unknown device '{args.switch}'. Available devices: {list(cfg['devices'].keys())}")
+        return
+
+    print("\n📱 Configured reMarkable Tablets:")
+    active = cfg.get("active_device", "rm2")
+    for key, d in cfg["devices"].items():
+        marker = "🟢 ACTIVE" if key == active else "⚪"
+        print(f"  {marker} {key:<10} - {d.get('name', key)} (Host: {d.get('host', key)})")
+    print(f"\nTip: Switch active tablet with: rm-ai device <name>\n")
+
 def main():
-    parser = argparse.ArgumentParser(description="rm-ai: Wireless AI Note Assistant for reMarkable 2")
+    parser = argparse.ArgumentParser(description="rm-ai: Wireless AI Note Assistant for reMarkable")
+    parser.add_argument("--device", "-d", type=str, default=None, help="Target specific tablet (e.g. rm2, rm-alt)")
     subparsers = parser.add_subparsers(dest="command")
+
+    # devices
+    p_dev = subparsers.add_parser("devices", aliases=["device"], help="List or switch active reMarkable tablet")
+    p_dev.add_argument("switch", nargs="?", default=None, help="Device name to activate (e.g. rm2, rm-alt)")
+    p_dev.set_defaults(func=cmd_devices)
 
     # list
     p_list = subparsers.add_parser("list", help="List all notebooks on reMarkable")
@@ -202,6 +265,7 @@ def main():
         return
 
     args.func(args)
+
 
 if __name__ == "__main__":
     main()
