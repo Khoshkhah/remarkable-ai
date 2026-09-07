@@ -1,0 +1,15 @@
+# Environment
+.venv/
+__pycache__/
+*.pyc
+
+# Local binaries and temp data
+rmview/
+*.zip
+*.tar.gz
+test_pull/
+/tmp/
+sample_handwriting.png
+
+# Secrets
+.env
