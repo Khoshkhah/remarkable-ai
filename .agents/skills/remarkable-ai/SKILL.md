@@ -35,6 +35,7 @@ When the user asks for a desk clock, standby dashboard, weather, Claude usage or
 ### 4. Real-Time Digital Clock & Live Vector Drawing:
 - Clock on the open page: `rm-ai clock` (saved defaults) or e.g. `rm-ai clock --pos center --thickness 28 --frame --interval 2`
 - Single time stamp: `rm-ai clock --once`
+- Clock that runs on the tablet without the PC, whenever its Clock document is open: `rm-ai clock --install` (`--uninstall` removes it)
 - Inject vector strokes: `rm-ai draw line --from X1,Y1 --to X2,Y2`
 - A notebook page must be open with the pen selected; after "Erase all" the eraser stays selected and strokes erase.
 

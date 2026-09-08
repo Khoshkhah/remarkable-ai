@@ -232,6 +232,21 @@ Things the tablet decides, not the tool: after "Erase all" the eraser stays the 
 every stroke erases, so tap the pen first; the pencil gets both darker and wider with pressure; the
 page must stay open and the tablet awake.
 
+### Clock that runs on the tablet itself (`rm-ai clock --install`)
+
+`rm-ai clock --install` puts the clock on the tablet, so it needs no PC afterwards: whenever you
+open the **Clock** document the clock starts drawing on it, and it stops when you close it (also
+after a reboot). It uses the same look as `rm-ai clock` (the built-in or saved defaults plus any
+flags given), the same pen rules and the same pen-yield: writing on the page pauses it. The document
+must be one page; it is pushed blank if you have none (`--doc` picks another title). The tablet
+shows this PC's local time. `rm-ai clock --uninstall` removes it; the log is
+`ssh root@<tablet> journalctl -u rmclock -f`.
+
+How it works: every stroke of the clock is pre-baked on the PC into raw input events (`app/`
+holds the 46 KB C replayer, built for ARMv7 with `app/build.sh` and Docker) and installed as a
+systemd service that watches which document is open and keeps checking that its strokes land in
+that page's file.
+
 ## How the virtual pen works
 
 Strokes are 16-byte Linux input events written straight into the tablet's Wacom digitizer over one

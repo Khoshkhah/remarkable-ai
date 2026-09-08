@@ -1053,7 +1053,7 @@ class VirtualStylus:
                     (EV_ABS, ABS_DISTANCE, 40), (EV_ABS, ABS_PRESSURE, 0))
         for d in (30, 20, 10):
             self._frame((EV_ABS, ABS_DISTANCE, d))
-        for i in range(int(self.PEN_HOVER / self.FRAME_DT) if back_to_pen else 0):
+        for i in range(int(self.PEN_HOVER / self.FRAME_DT) if back_to_pen and self.FRAME_DT else 0):
             self._frame((EV_ABS, ABS_DISTANCE, 10 + (i & 1)))
 
         # 2. Touch down
@@ -1501,6 +1501,104 @@ class DigitalClock:
             print("Virtual stylus disconnected.", flush=True)
 
 
+TABLET_APP_DIR = "/home/root/.local/share/rmclock"   # where the tablet-resident clock lives
+RMCLOCK_UNIT = """[Unit]
+Description=rm-ai clock, drawn by the tablet while its Clock document is open
+
+[Service]
+ExecStart=%s/rmclock %s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+""" % (TABLET_APP_DIR, TABLET_APP_DIR)
+
+
+class StrokeRecorder(VirtualStylus):
+    """A stylus that keeps the bytes it would have sent instead of sending them. The tablet-resident
+    clock (app/rmclock.c) replays them, so its strokes are byte-for-byte the ones this tool draws."""
+    FRAME_DT = TOOL_SETTLE = ERASE_SETTLE = 0
+
+    def __init__(self):
+        import io
+        super().__init__(host="-")
+        self.proc = argparse.Namespace(stdin=io.BytesIO())
+
+    def connect(self):
+        pass
+
+    def close(self):
+        pass
+
+    def take(self):
+        import io
+        data, self.proc.stdin = self.proc.stdin.getvalue(), io.BytesIO()
+        return data
+
+
+def bake_clock_app(clock, out):
+    """Write every stroke of `clock` into `out`, one raw input-event file per stroke, named as
+    app/rmclock.c expects: d<slot><seg>/e<slot><seg> (pen/eraser per segment), colon<i>, frame."""
+    rec = StrokeRecorder()
+    clock.stylus = rec
+    for i, d in enumerate(clock.digits):
+        d.stylus = rec
+        for seg in "ABCDEFG":
+            rec.stroke(d.draw_coords[seg], pressure=d.pressure)
+            (out / f"d{i}{seg}.bin").write_bytes(rec.take())
+            rec.stroke(d.erase_coords[seg], is_eraser=True, pressure=4000)
+            (out / f"e{i}{seg}.bin").write_bytes(rec.take())
+    for i, (cx, cy) in enumerate(clock.colons):
+        rec.stroke(clock._dot(cx, cy, clock.thickness, clock.pen_width), pressure=clock.pressure)
+        (out / f"colon{i}.bin").write_bytes(rec.take())
+    if clock.frame:
+        rec.stroke(clock._frame_path(0), pressure=clock.pressure)
+        (out / "frame.bin").write_bytes(rec.take())
+
+
+def install_clock_app(host, clock, doc_title, interval, fmt):
+    """Put the clock on the tablet: the baked strokes, the replayer and a systemd unit that starts it at
+    boot. It then draws whenever the `doc_title` document is open, with no PC involved."""
+    import shutil
+    binary = Path(__file__).resolve().with_name("app") / "rmclock"
+    if not binary.exists():
+        print("❌ app/rmclock is missing: build it with app/build.sh (needs Docker)")
+        return
+    doc = next((nb for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"] == "/"), None)
+    if doc is None:
+        print(f"📄 Pushing a blank '{doc_title}' document (the tablet reloads once)...", flush=True)
+        doc_uuid = push_chat_document(host, doc_title, pages=1)
+    else:
+        doc_uuid = doc["uuid"]
+    content = json.loads(run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
+    pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
+    page = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        bake_clock_app(clock, out)
+        (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page}.rm\nslots={len(clock.digits)}\n"
+                                    f"fmt={fmt}\ninterval={max(1, int(interval))}\n")
+        if os.path.exists("/etc/localtime"):      # the tablet runs on UTC; the clock shows this PC's local time
+            shutil.copy("/etc/localtime", out / "localtime")
+        shutil.copy(binary, out / "rmclock")
+        (out / "rmclock.service").write_text(RMCLOCK_UNIT)
+        print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes and the replayer on the tablet...", flush=True)
+        run_ssh(f"systemctl stop rmclock 2>/dev/null; rm -rf {TABLET_APP_DIR}; mkdir -p {TABLET_APP_DIR}", host=host)
+        tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
+        subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_APP_DIR} -xf -"], input=tar, check=True)
+    run_ssh(f"chmod +x {TABLET_APP_DIR}/rmclock && mv {TABLET_APP_DIR}/rmclock.service /etc/systemd/system/ && "
+            "systemctl daemon-reload && systemctl enable rmclock >/dev/null 2>&1 && systemctl restart rmclock", host=host)
+    print(f"✅ Clock installed: open '{doc_title}' on the tablet and it starts by itself (also after a reboot); "
+          f"close the document and it stops. Log: ssh {host} journalctl -u rmclock -f")
+
+
+def uninstall_clock_app(host):
+    run_ssh(f"systemctl disable --now rmclock >/dev/null 2>&1; rm -f /etc/systemd/system/rmclock.service; "
+            f"systemctl daemon-reload; rm -rf {TABLET_APP_DIR}", host=host)
+    print("🗑️  Clock removed from the tablet (the Clock document is kept)")
+
+
 def cmd_clock(args):
     import signal
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))   # so the stylus is closed (pen lifted) when killed
@@ -1523,12 +1621,22 @@ def cmd_clock(args):
         print(f"💾 Saved as defaults for 'rm-ai clock': {cfg['clock_defaults']}")
         return
     host = get_active_host(args.device)
+    if args.uninstall:
+        uninstall_clock_app(host)
+        return
+    if args.install and opts["pen_width"] is None:
+        print("❌ --install needs a known pen width (--pen-width), the tablet cannot measure the pen by itself")
+        return
     try:
         clock = DigitalClock(host=host, pos=opts["pos"], format=args.format, size=opts["size"],
                              thickness=opts["thickness"], pressure=opts["pressure"], pen_width=opts["pen_width"],
                              frame=bool(opts["frame"]), ink_width=opts["ink_width"])
     except ValueError as e:
         print(f"❌ {e}")
+        return
+    if args.install:
+        fmt = {"MM:SS": "%M%S", "HH:MM": "%H%M"}.get(args.format, "%H%M%S")
+        install_clock_app(host, clock, args.doc, opts["interval"], fmt)
         return
     clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once, interval=opts["interval"], slow=args.slow, step=args.step)
 
@@ -2597,6 +2705,9 @@ def main():
     p_clock.add_argument("--step", type=int, default=1, help="Number of seconds to advance per update (default: 1)")
     p_clock.add_argument("--once", "-1", action="store_true", help="Draw current time once and exit immediately")
     p_clock.add_argument("--clear", action="store_true", help="Erase the clock from screen on exit")
+    p_clock.add_argument("--install", action="store_true", help="Install the clock on the tablet itself: it then runs whenever the --doc document is open, no PC needed (see app/)")
+    p_clock.add_argument("--uninstall", action="store_true", help="Remove the tablet-resident clock again")
+    p_clock.add_argument("--doc", default="Clock", help="Title of the document the tablet-resident clock runs in (default Clock; pushed blank if missing)")
     p_clock.set_defaults(func=cmd_clock)
 
     # draw

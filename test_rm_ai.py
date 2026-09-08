@@ -120,10 +120,30 @@ def test_box_detection_accepts_rectangles_and_rejects_lines_and_loops():
     assert rm_ai.inside((300, 200), circle) and not rm_ai.inside((100, 100), circle)
 
 
+def test_baked_clock_strokes_are_the_live_strokes_under_the_names_the_replayer_expects():
+    import tempfile
+    from pathlib import Path
+    clock = rm_ai.DigitalClock(host="-", pos="center", size="large", thickness=28, pressure=4000, pen_width=12, frame=True, ink_width=70)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        rm_ai.bake_clock_app(clock, out)
+        names = sorted(p.name for p in out.iterdir())
+        assert names == sorted([f"{k}{i}{s}.bin" for k in "de" for i in range(6) for s in "ABCDEFG"] + [f"colon{i}.bin" for i in range(4)] + ["frame.bin"])
+        st = rm_ai.VirtualStylus.__new__(rm_ai.VirtualStylus)   # the live stylus, sending the same segment
+        st.proc, st.tool, st.FRAME_DT, st.real_until, st.sent, st.guard, st.recheck = FakeProc(), None, 0, 0.0, {}, None, False
+        st.stroke(clock.digits[2].draw_coords["G"], pressure=4000)
+        assert events((out / "d2G.bin").read_bytes()) == events(st.proc.stdin.getvalue())
+        for name in names:   # every file is one whole stroke: tool in first, tool out last, frames in between
+            evs = events((out / name).read_bytes())
+            tool = rm_ai.BTN_TOOL_RUBBER if name[0] == "e" else rm_ai.BTN_TOOL_PEN
+            assert evs[0] == (rm_ai.EV_KEY, tool, 1) and evs[-2] == (rm_ai.EV_KEY, tool, 0) and evs[-1][0] == rm_ai.EV_SYN
+
+
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
     test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours()
     test_claude_usage_summary_from_the_documented_report_shapes()
     test_weather_summary_from_the_open_meteo_shape()
     test_box_detection_accepts_rectangles_and_rejects_lines_and_loops()
+    test_baked_clock_strokes_are_the_live_strokes_under_the_names_the_replayer_expects()
     print("ok")

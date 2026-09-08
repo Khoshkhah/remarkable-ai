@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-module Python CLI (`rm_ai.py`, ~1700 lines) that drives a reMarkable tablet over local
+A single-module Python CLI (`rm_ai.py`, ~2500 lines) that drives a reMarkable tablet over local
 Wi-Fi SSH: reads handwritten pages, renders them to PNG, pushes documents, injects live stylus
 strokes, and paints an e-ink dashboard onto the sleep screen. There is no package directory —
 `pyproject.toml` declares `py-modules = ["rm_ai"]` with entry points `rm-ai` / `rm_ai` → `rm_ai:main`
@@ -109,10 +109,24 @@ state changed — pen to draw, eraser to remove — which is what keeps e-ink ch
 derives its corner gap and erase sweep from that ink width against the fixed ~17px medium eraser,
 so erasing one segment never nicks a neighbour (`test_rm_ai.py` asserts this); bars too thick for
 the digit size raise `ValueError`. The width of one pen line at the chosen `--pressure` is
-measured by `detect_pen_width()` from the newest page's saved strokes (every stroke records pen,
+measured by `measure_pen_width()` from the page's saved strokes (every stroke records pen,
 pressure and drawn width), with `--pen-width` as the manual override. `--save-defaults` stores the clock flags under
 `clock_defaults` in the config file; `cmd_clock` resolves flag > saved default > built-in. The
 tick loop sleeps to the next wall-clock second, so drawing time cannot drift or skip seconds.
+
+**Tablet-resident clock** (`clock --install`, `app/`): the one thing that runs *on* the tablet.
+`StrokeRecorder` is a `VirtualStylus` with zero pacing that keeps the bytes instead of sending them;
+`bake_clock_app()` records every stroke of a `DigitalClock` into one file per stroke
+(`d<slot><seg>`/`e<slot><seg>`, `colon<i>`, `frame`), and `install_clock_app()` ships those, a
+`config` (document uuid, page `.rm` path, slots, strftime format, interval), the PC's `/etc/localtime`
+(the tablet runs on UTC) and the static ARMv7 binary `app/rmclock` to `/home/root/.local/share/rmclock`
+with a systemd unit `rmclock.service`. `app/rmclock.c` replays the blobs with the same pacing constants
+(keep them in sync with `VirtualStylus` by hand), yields to the real pen by reading the digitizer
+back and filtering its own echo, draws only while `LastOpen` in `xochitl.conf` names the clock
+document (xochitl clears it to `@ByteArray()` on the home screen) and stops if the page's `.rm` has
+not been autosaved for 3 awake minutes (strokes not landing = page not on screen). Rebuild with
+`app/build.sh` (Docker, `alpine` arm/v7 image, musl static); the binary is committed. It takes
+`rmclock <dir> [xochitl.conf] [event device]` so a dry run on the PC against a plain file works.
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
 image locally. `--mode standby` scp's it to `/usr/share/remarkable/suspended.png`, backing the factory
