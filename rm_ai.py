@@ -1590,14 +1590,17 @@ def fetch_claude_subscription_usage():
             body = json.load(r)
     except Exception as e:
         return {"error": str(e)[:80]}
-    labels = {"five_hour": "Session", "seven_day": "Week", "seven_day_fable": "Week Fable",
+    # the endpoint names the model-specific weekly window by a codename ("nimbus_quill" as of 2026-09);
+    # /usage in Claude Code shows it as the weekly Fable limit
+    labels = {"five_hour": "Session", "seven_day": "Week", "nimbus_quill": "Week Fable", "seven_day_fable": "Week Fable",
               "seven_day_opus": "Week Opus", "seven_day_sonnet": "Week Sonnet"}
-    windows = [(labels.get(k, k.replace("_", " ").title()), v.get("utilization"), v.get("resets_at"))
+    windows = [(labels.get(k, k.replace("_", " ").title()[:12]), v.get("utilization"), v.get("resets_at"))
                for k, v in body.items() if isinstance(v, dict) and v.get("utilization") is not None]
     if not windows:
         return {"error": "unexpected response, keys: " + ", ".join(list(body)[:6])}
     order = {"Session": 0, "Week": 1, "Week Fable": 2, "Week Opus": 3}
-    return {"windows": sorted(windows, key=lambda w: order.get(w[0], 9))[:3]}
+    return {"windows": sorted(windows, key=lambda w: order.get(w[0], 9))[:3],
+            "all_keys": [k for k, v in body.items() if isinstance(v, dict)]}
 
 
 def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None):
@@ -1675,7 +1678,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     y_use = y_cal + 8
     draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
     if claude_usage is None:
-        draw.text((250, y_use), "set ANTHROPIC_ADMIN_KEY to show usage", font=get_font(18), fill=110)
+        draw.text((250, y_use), "spend needs ANTHROPIC_ADMIN_KEY", font=get_font(18), fill=110)
     elif "error" in claude_usage:
         draw.text((250, y_use), f"unavailable: {claude_usage['error'][:34]}", font=get_font(18), fill=110)
     else:
@@ -1852,6 +1855,7 @@ def cmd_dashboard(args):
         print(f"⚠️  Claude usage unavailable: {subscription['error']}")
     else:
         print("🤖 Claude usage: " + "  •  ".join(f"{l} {float(p):.0f}%" for l, p, _ in subscription["windows"]))
+        print("   usage windows reported by the endpoint: " + ", ".join(subscription.get("all_keys", [])))
 
     # Render image
     im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format,
