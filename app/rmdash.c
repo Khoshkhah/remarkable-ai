@@ -87,7 +87,7 @@ static int https(const char *host, const char *request, char *out, size_t cap) {
     chmod(req, 0600); fputs(request, f); fclose(f);
     char cmd[1200];
     snprintf(cmd, sizeof cmd, "openssl s_client -quiet -ign_eof -connect %s:443 -servername %s -verify_return_error -CApath /etc/ssl/certs < %s 2>/dev/null & p=$!; "
-             "(sleep 45; kill $p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; kill $w 2>/dev/null", host, host, req);
+             "(sleep 25; kill $p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; kill $w 2>/dev/null", host, host, req);
     FILE *pp = popen(cmd, "r"); if (!pp) return -1;
     size_t n = fread(out, 1, cap - 1, pp); out[n] = 0; pclose(pp); unlink(req);
     if (n < 12 || strncmp(out, "HTTP/", 5)) return -1;
@@ -313,26 +313,6 @@ static void swap_daily_page(void) {
     if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
 }
 
-/* The clock changes one digit at a time: erase and redraw only the digits that differ, each under a
- * one-digit-wide sweep shifted into place (digits share one advance width, so positions never move).
- * Returns 0 when that is not possible (nothing shown yet, or no column sweep baked) and the whole
- * zone is to be redone. */
-static int update_clock(const char *shown, const char *want) {
-    struct text *t = T("clock"); if (!t || !shown[0] || strlen(shown) != strlen(want)) return 0;
-    char name[32]; snprintf(name, sizeof name, "sweep_col%d.bin", t->size);
-    char path[600]; snprintf(path, sizeof path, "%s/%s", dir, name);
-    if (access(path, R_OK)) return 0;
-    int i; for (i = 0; i < ngl && gl[i].size != t->size; i++);
-    if (i == ngl) return 0;
-    double x = t->x; int changed[16] = {0}, any = 0; double xs[16];
-    for (int k = 0; want[k] && k < 16; k++) { xs[k] = x; changed[k] = want[k] != shown[k]; any |= changed[k]; x += gl[i].adv[(unsigned char)want[k]]; }
-    if (!any) return 1;
-    for (int k = 0; want[k] && k < 16; k++) if (changed[k]) { stroke_file(name, 1, (int)lround(xs[k]) - base_x, 0, -1); if (page_lost) return 1; }
-    hover(START_SETTLE_US);
-    for (int k = 0; want[k] && k < 16; k++) if (changed[k]) { char g[32]; snprintf(g, sizeof g, "g%d_%d.bin", t->size, (unsigned char)want[k]); stroke_file(g, 0, (int)lround(xs[k]) - base_x, t->y - base_y, -1); if (page_lost) return 1; }
-    return 1;
-}
-
 static void save_state(char shown[NZ][512], long rm_mtime) {
     char path[600]; snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "w"); if (!f) return;
@@ -400,26 +380,32 @@ int main(int argc, char **argv) {
             ink_reset(&ink, rmfile);
             if (page_lost) continue;
         }
-        if (time(NULL) - fetched >= minutes * 60) { if (zone_on[7]) fetch_weather(); fetch_usage(); fetched = time(NULL); }
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
         int changed[NZ], any = 0; char name[32];
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
-        if (changed[0] && update_clock(shown[0], want[0])) {   /* digit by digit; the other zones follow below */
-            if (page_lost) continue;
-            strcpy(shown[0], want[0]); fprintf(stderr, "clock: %s\n", want[0]);
-            changed[0] = 0; any = 0; for (int z = 1; z < NZ; z++) any |= changed[z];
-        }
         for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
         if (page_lost) continue;
         if (any) hover(START_SETTLE_US);
         for (int z = 0; z < NZ; z++) if (changed[z]) {
+            long long t0 = now_us(); long f0 = frames_written;
             draw_zone(z, want[z], &lt);
             if (page_lost) break;
-            strcpy(shown[z], want[z]); fprintf(stderr, "%s: %s\n", ZONES[z], want[z]);
+            strcpy(shown[z], want[z]);
+            fprintf(stderr, "%s: %s (%.0f s, %ld frames, %.1f ms/frame)\n", ZONES[z], want[z], (now_us() - t0) / 1e6, frames_written - f0,
+                    frames_written > f0 ? (now_us() - t0) / 1e3 / (frames_written - f0) : 0.0);
         }
         if (page_lost) continue;
         if (ink_lost(&ink)) { lost = 1; continue; }
+        if (ink_wiped(&ink)) { for (int z = 0; z < NZ; z++) shown[z][0] = 0; unlink(state_path); continue; }
+        if (time(NULL) - fetched >= minutes * 60) {        /* network only after drawing; what changed is drawn next round */
+            long long t0 = now_us();
+            if (zone_on[7]) fetch_weather();
+            fetch_usage();
+            fetched = time(NULL);
+            fprintf(stderr, "data fetched in %.1f s\n", (now_us() - t0) / 1e6);
+            continue;
+        }
         long wait = 60 - (long)(time(NULL) % 60);
         while (wait > 0 && page_on_screen()) { nap(2000000); wait -= 2; }
     }

@@ -146,7 +146,6 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         out = Path(tmp)
         rm_ai.bake_dash_app(out, rm_ai.dash_pen_profile("Ballpointv2"))
         names = {p.name for p in out.iterdir()}
-        assert "sweep_col190.bin" in names
         for size, chars in rm_ai.GLYPH_SETS.items():
             assert all(f"g{size}_{ord(c)}.bin" in names for c in chars), size
         assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])

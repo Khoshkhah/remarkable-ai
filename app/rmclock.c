@@ -57,6 +57,11 @@ int main(int argc, char **argv) {
         time_t t = (time_t)((time(NULL) / interval) * interval);
         struct tm lt; localtime_r(&t, &lt);
         char want[8]; strftime(want, sizeof want, fmt, &lt);
+        if (!shown[0] && active > 1) {                      /* a wiped page: the static parts first */
+            for (int cc = 0; cc < 8; cc++) { snprintf(name, sizeof name, "colon%d.bin", cc); if (!stroke_file(name, 0, 0, 0, -1)) break; }
+            stroke_file("frame.bin", 0, 0, 0, -1);
+        }
+        active = 2;
         if (strcmp(want, shown)) {
             for (int s = 0; s < slots; s++) {              /* all erasing first ... */
                 if (shown[0] && shown[s] == want[s]) continue;
@@ -76,6 +81,7 @@ int main(int argc, char **argv) {
         }
         if (page_lost) { page_lost = 0; lost = 1; continue; }
         if (ink_lost(&ink)) { lost = 1; continue; }
+        if (ink_wiped(&ink)) { shown[0] = 0; continue; }     /* colons and frame are gone too: drawn again below */
         long long us = interval * 1000000LL - now_us() % (interval * 1000000LL);
         nap(us);
     }

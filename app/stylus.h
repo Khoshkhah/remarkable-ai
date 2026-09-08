@@ -79,7 +79,9 @@ static void nap(long us) {   /* sleep in slices, keeping the pen watch alive */
     while (us > 0) { watch_pen(); long s = us < 100000 ? us : 100000; usleep((useconds_t)s); us -= s; }
 }
 
+static long frames_written = 0;
 static void write_frame(const struct ev *ev, int n) {
+    frames_written++;
     for (int i = 0; i < n; i++) {
         ring[ring_i].type = ev[i].type; ring[ring_i].code = ev[i].code; ring[ring_i].value = ev[i].value; ring[ring_i].t = now_us();
         ring_i = (ring_i + 1) % RING;
@@ -279,8 +281,18 @@ static void close_device(void) { if (fd >= 0) { lift_everything(); close(fd); fd
 
 /* our strokes must keep showing up in the page's autosave; if they stop while we are awake, the
  * document is not what is on screen. A long gap between checks was a suspend and does not count. */
-struct ink { const char *rm; long seen, awake_s; long long last; };
-static void ink_reset(struct ink *w, const char *rm) { w->rm = rm; w->seen = mtime(rm); w->awake_s = 0; w->last = now_us(); }
+struct ink { const char *rm; long seen, awake_s, biggest; long long last; };
+static long fsize(const char *path) { struct stat st; return stat(path, &st) ? 0 : (long)st.st_size; }
+static void ink_reset(struct ink *w, const char *rm) { w->rm = rm; w->seen = mtime(rm); w->awake_s = 0; w->last = now_us(); w->biggest = fsize(rm); }
+/* the page was wiped (Erase all, or the file removed): its file shrank to a fraction of what our strokes filled */
+static int ink_wiped(struct ink *w) {
+    long sz = fsize(w->rm);
+    if (sz > w->biggest) w->biggest = sz;
+    if (w->biggest < 4000 || sz > w->biggest / 4) return 0;
+    fprintf(stderr, "the page was cleaned (%ld of %ld bytes left): drawing everything again\n", sz, w->biggest);
+    w->biggest = sz;
+    return 1;
+}
 static int ink_lost(struct ink *w) {
     long m = mtime(w->rm);
     long long now = now_us(), gap = (now - w->last) / 1000000;

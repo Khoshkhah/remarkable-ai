@@ -1664,8 +1664,8 @@ def dash_pen_profile(pen_name):
 
 
 def bake_dash_app(out, profile):
-    """Bake glyphs (one file per glyph and size), zone sweeps, one-digit column sweeps for the clock and
-    the usage bars for app/rmdash.c, plus the `layout` and `glyphs` tables it reads."""
+    """Bake glyphs (one file per glyph and size), zone sweeps and the usage bars for app/rmdash.c, plus
+    the `layout` and `glyphs` tables it reads."""
     rec = StrokeRecorder()
     pitch, small_pitch = profile["pitch"], profile["pitch_small"]
     pressure, small = profile["pressure"], profile["pressure_small"]
@@ -1684,13 +1684,7 @@ def bake_dash_app(out, profile):
     for name, zone in TABLET_DASH_LAYOUT["zones"].items():
         rec.stroke(sweep_path(*zone), is_eraser=True, pressure=4000)
         (out / f"sweep_{name}.bin").write_bytes(rec.take())
-    # the clock changes one digit at a time: a sweep as wide as one digit of the clock font, baked at the
-    # glyph base so rmdash can shift it under any digit position (digits share one advance width)
-    size, _, _ = TABLET_DASH_LAYOUT["texts"]["clock"]
-    adv = get_font(size, bold=True).getlength("0")
-    _, y0, _, y1 = TABLET_DASH_LAYOUT["zones"]["clock"]
-    rec.stroke(sweep_path(gx, y0, gx + adv - 2, y1), is_eraser=True, pressure=4000)
-    (out / f"sweep_col{size}.bin").write_bytes(rec.take())
+
     for i, (x0, x1, y) in enumerate(TABLET_DASH_LAYOUT["bars"]):
         rec.stroke([(x0, y), (x1, y)], pressure=pressure)
         (out / f"bar{i}.bin").write_bytes(rec.take())
@@ -1761,7 +1755,8 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         bake_dash_app(out, dash_pen_profile(pen))
         shutil.move(str(stock / "pages"), str(out / "pages"))
         shutil.rmtree(stock, ignore_errors=True)
-        (out / "printed").write_text(datetime.now().strftime("%Y-%m-%d") if not (no_push and existing) else "unknown")
+        if not (no_push and existing):
+            (out / "printed").write_text(datetime.now().strftime("%Y-%m-%d"))   # else the tablet keeps its own
         (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\npdf={REMOTE_PATH}/{doc_uuid}.pdf\n"
                                     f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=15\n")
         if token:
@@ -1776,9 +1771,11 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         (out / "rmdash.service").write_text(RMCLOCK_UNIT.replace("rmclock", "rmdash").replace(TABLET_APP_DIR, TABLET_DASH_DIR)
                                             .replace("its Clock document", "its Dashboard page"))
         print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes, {DASH_STOCK_DAYS + 1} daily pages and the dashboard program on the tablet...", flush=True)
-        # a token the tablet has been renewing itself is newer than any copy on the PC: keep it unless one is given
-        run_ssh(f"[ -f {TABLET_DASH_DIR}/token ] && cp {TABLET_DASH_DIR}/token /tmp/rmdash.token; rm -rf {TABLET_DASH_DIR}; mkdir -p {TABLET_DASH_DIR}; "
-                f"[ -f /tmp/rmdash.token ] && mv /tmp/rmdash.token {TABLET_DASH_DIR}/token; true", host=host)
+        # a token the tablet has been renewing itself is newer than any copy on the PC: keep it unless one is
+        # given; without a push the printed page is still the one on the tablet, so keep its date too
+        keep = "token printed" + (" state" if no_push and existing else "")   # what is drawn stays valid without a push
+        run_ssh(f"cd {TABLET_DASH_DIR} 2>/dev/null && for f in {keep}; do cp $f /tmp/rmdash.$f 2>/dev/null; done; "
+                f"rm -rf {TABLET_DASH_DIR}; mkdir -p {TABLET_DASH_DIR}; for f in {keep}; do mv /tmp/rmdash.$f {TABLET_DASH_DIR}/$f 2>/dev/null; done; true", host=host)
         tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
         subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_DASH_DIR} -xf -"], input=tar, check=True)
     run_ssh(f"chmod +x {TABLET_DASH_DIR}/rmdash && chmod 600 {TABLET_DASH_DIR}/token 2>/dev/null; mv {TABLET_DASH_DIR}/rmdash.service /etc/systemd/system/ && "
