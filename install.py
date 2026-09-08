@@ -50,6 +50,36 @@ def main():
             print("   Please check your pip/python environment.")
             sys.exit(1)
 
+    # 2b. Ensure CLI launchers exist for both rm-ai and rm_ai
+    local_bin = Path.home() / ".local" / "bin"
+    try:
+        local_bin.mkdir(parents=True, exist_ok=True)
+        py_path = sys.executable
+        for cmd_name in ["rm-ai", "rm_ai"]:
+            launcher = local_bin / cmd_name
+            launcher.write_text(f"""#!/usr/bin/env bash
+exec "{py_path}" -m rm_ai "$@"
+""")
+            launcher.chmod(0o755)
+    except Exception:
+        pass
+
+    # Check PATH
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    str_local_bin = str(local_bin)
+    if str_local_bin not in path_dirs and sys.platform.startswith("linux"):
+        bashrc = Path.home() / ".bashrc"
+        if bashrc.exists():
+            try:
+                b_text = bashrc.read_text()
+                if ".local/bin" not in b_text:
+                    with open(bashrc, "a") as f:
+                        f.write('\nexport PATH="$HOME/.local/bin:$PATH"\n')
+                    print(f"   [PATH] Added ~/.local/bin to {bashrc}")
+            except Exception:
+                pass
+        print(f"   💡 Notice: Run 'export PATH=\"$HOME/.local/bin:$PATH\"' or restart terminal to use rm-ai/rm_ai.")
+
     # 3. Configure AI Agents (Antigravity, Gemini, Claude Code)
     print("🤖 Step 2: Configuring AI Agents...")
     skill_src = repo_dir / ".agents" / "skills" / "remarkable-ai" / "SKILL.md"
