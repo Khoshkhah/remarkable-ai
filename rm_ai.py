@@ -163,16 +163,18 @@ def cmd_read(args):
         local_rm = os.path.join(tmpdir, f"{page_uuid}.rm")
         local_png = os.path.join(tmpdir, f"{page_uuid}.png")
         
+        target_host = get_active_host(getattr(args, "device", None))
         # Pull page wirelessly
-        subprocess.run(["scp", "-q", f"{SSH_HOST}:{REMOTE_PATH}/{target['uuid']}/{page_uuid}.rm", local_rm], check=True)
+        subprocess.run(["scp", "-q", f"{target_host}:{REMOTE_PATH}/{target['uuid']}/{page_uuid}.rm", local_rm], check=True)
         
         # Render
         rendered = render_rm_to_png(local_rm, local_png)
         if not rendered:
-            print("⚠️ Page contains no pen strokes (blank page).")
+            print("Page contains no pen strokes (blank page).")
             return
             
-        print(f"🎨 Rendered page to image! Analyzing with AI ({args.action or 'summarize'})...")
+        print(f"Rendered page to image! Analyzing with AI ({args.action or 'summarize'})...")
+
         
         # Save copy locally if requested
         if args.save:
