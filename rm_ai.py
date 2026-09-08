@@ -806,14 +806,14 @@ class SevenSegmentDigit:
         self.box_eraser_coords = self._compute_box_eraser_coords()
 
     def _compute_box_eraser_coords(self):
-        # 3 overlapping vertical lanes with dense points (steps every 12px) to fully wipe the digit box
+        # 5 vertical lanes covering the full digit bounding box with dense steps
         x, y, w, h = self.x, self.y, self.w, self.h
-        pad = 8
-        x_lanes = [x + int(w * f) for f in [0.18, 0.50, 0.82]]
+        pad_y = 10
+        x_lanes = [x - 4, x + int(w * 0.25), x + int(w * 0.50), x + int(w * 0.75), x + w + 4]
         steps = 15
         pts = []
         for lane_idx, lx in enumerate(x_lanes):
-            y1, y2 = y - pad, y + h + pad
+            y1, y2 = y - pad_y, y + h + pad_y
             if lane_idx % 2 == 0:
                 pts.extend([(lx, int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)])
             else:
@@ -866,7 +866,8 @@ class SevenSegmentDigit:
 
         # 1. If updating an existing character, wipe its bounding box completely
         if self.current_char is not None:
-            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3400)
+            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3500)
+            time.sleep(0.15)  # 150ms buffer for xochitl to commit eraser clipping
 
         # 2. Draw all active segments for the new character fresh and bold
         target_segments = DIGIT_SEGMENTS.get(char, set())
@@ -879,7 +880,7 @@ class SevenSegmentDigit:
 
     def clear(self):
         if self.current_char is not None:
-            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3400)
+            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3500)
             self.current_char = None
 
 
@@ -978,7 +979,7 @@ class DigitalClock:
             add_digit()
             add_digit()
 
-    def run(self, duration=None, clear_on_exit=False, once=False):
+    def run(self, duration=None, clear_on_exit=False, once=False, interval=1):
         print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos} (size: {self.w}x{self.h})", flush=True)
         self.stylus.connect()
         try:
@@ -987,7 +988,12 @@ class DigitalClock:
                 self.stylus.stroke(dots, is_eraser=False, pressure=3900)
 
             now = datetime.now()
-            time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+            if interval > 1:
+                rounded_sec = (now.second // interval) * interval
+                time_str = f"{now.minute:02d}{rounded_sec:02d}" if self.format == "MM:SS" else f"{now.hour:02d}{now.minute:02d}{rounded_sec:02d}"
+            else:
+                time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+
             total_changes = 0
             for digit, char in zip(self.digits, time_str):
                 changes = digit.transition_to(char)
@@ -998,7 +1004,7 @@ class DigitalClock:
             if once:
                 return
 
-            print(f"⚡ Minimum delta state machine active (only changed segments toggled per second).", flush=True)
+            print(f"⚡ Update interval: {interval}s (wiping and redrawing only changed digits).", flush=True)
             print(f"💡 Make sure a notebook page is open on your tablet screen.", flush=True)
             print(f"   Press Ctrl+C to stop.\n", flush=True)
 
@@ -1006,7 +1012,12 @@ class DigitalClock:
             last_sec = time_str
             while True:
                 now = datetime.now()
-                time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+                if interval > 1:
+                    rounded_sec = (now.second // interval) * interval
+                    time_str = f"{now.minute:02d}{rounded_sec:02d}" if self.format == "MM:SS" else f"{now.hour:02d}{now.minute:02d}{rounded_sec:02d}"
+                else:
+                    time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+
                 if time_str != last_sec:
                     last_sec = time_str
                     total_changes = 0
@@ -1014,16 +1025,16 @@ class DigitalClock:
                         changes = digit.transition_to(char)
                         total_changes += changes
                     display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
-                    print(f"  [{display_str}] Segments updated: {total_changes}", flush=True)
+                    print(f"  [{display_str}] Digits updated: {total_changes}", flush=True)
 
                 if duration and (time.time() - start_time) >= duration:
                     print(f"\n⏱️ Duration of {duration}s reached.", flush=True)
                     break
 
                 now_t = time.time()
-                sleep_t = 1.0 - (now_t % 1.0)
-                if sleep_t < 0.05:
-                    sleep_t += 1.0
+                sleep_t = interval - (now_t % interval)
+                if sleep_t < 0.1:
+                    sleep_t += interval
                 time.sleep(sleep_t)
         except KeyboardInterrupt:
             print("\nClock stopped by user.", flush=True)
@@ -1033,7 +1044,7 @@ class DigitalClock:
                 for d in self.digits:
                     d.clear()
                 for dots in self.colon_coords:
-                    self.stylus.stroke(dots, is_eraser=True, pressure=3200)
+                    self.stylus.stroke(dots, is_eraser=True, pressure=3500)
             self.stylus.close()
             print("Virtual stylus disconnected.", flush=True)
 
@@ -1041,7 +1052,7 @@ class DigitalClock:
 def cmd_clock(args):
     host = get_active_host(args.device)
     clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size)
-    clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once)
+    clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once, interval=args.interval)
 
 
 def cmd_draw(args):
@@ -1122,6 +1133,7 @@ def main():
     p_clock.add_argument("--size", "-s", type=str, default=None, choices=["small", "medium", "large", "xlarge"], help="Clock size preset")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
+    p_clock.add_argument("--interval", "-i", type=int, default=1, help="Update interval in seconds (e.g. 5 for test)")
     p_clock.add_argument("--once", "-1", action="store_true", help="Draw current time once and exit immediately")
     p_clock.add_argument("--clear", action="store_true", help="Erase the clock from screen on exit")
     p_clock.set_defaults(func=cmd_clock)
