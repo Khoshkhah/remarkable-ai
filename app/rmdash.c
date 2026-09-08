@@ -1,0 +1,359 @@
+/* rmdash: the dashboard page, kept current on the reMarkable by the tablet itself.
+ *
+ * `rm-ai dashboard --install` pushes the page (printed labels only) and bakes, next to this program:
+ *   g<size>_<code>.bin     pen strokes of one glyph, baked with the text origin at `base` (see layout)
+ *   sweep_<zone>.bin       eraser serpentine over one zone;  bar<i>.bin  a full usage bar (truncated here)
+ *   ring.bin               the ring around today's calendar day, centered on `base`
+ *   layout, glyphs         zones/text positions and per-glyph advance widths (written by rm_ai.py)
+ *   config                 doc= rm= lat= lon= city= minutes=
+ *   usage                  the three usage rows: written by the PC every 15 min, or here when a
+ *   token                  Claude login of the tablet's own (access= refresh= expires=) exists
+ * Every minute the clock is redrawn; date, calendar, weather and usage rows only when they change.
+ * The tablet fetches weather (Open-Meteo) and, with a token, Claude usage through openssl itself.
+ */
+#include "stylus.h"
+
+#define NZ 8
+static const char *ZONES[NZ] = {"clock", "date", "caltitle", "cal", "row0", "row1", "row2", "weather"};
+static char doc[64], rmfile[600], city[64], tmpv[128];
+static double lat = 0, lon = 0;
+static long minutes = 15;
+static int base_x = 300, base_y = 300;
+
+struct text { char name[16]; int size, x, y; };
+static struct text texts[40]; static int ntexts = 0;
+static struct { int x0, x1, y; } bars[3];
+static struct { int x0, y0, col, row; } cal;
+static struct { int size; double adv[256]; } gl[8]; static int ngl = 0;
+
+static struct text *T(const char *name) { for (int i = 0; i < ntexts; i++) if (!strcmp(texts[i].name, name)) return &texts[i]; return NULL; }
+
+static void read_layout(void) {
+    char path[600]; snprintf(path, sizeof path, "%s/layout", dir);
+    FILE *f = fopen(path, "r"); if (!f) { perror("layout"); exit(1); }
+    char line[256], kind[16], name[16];
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "text %15s %d %d %d", name, &texts[ntexts].size, &texts[ntexts].x, &texts[ntexts].y) == 4 && ntexts < 40) { strcpy(texts[ntexts].name, name); ntexts++; }
+        else if (sscanf(line, "%15s", kind) == 1 && !strcmp(kind, "bar")) {
+            int i, x0, x1, y;
+            if (sscanf(line, "bar %d %d %d %d", &i, &x0, &x1, &y) == 4 && i >= 0 && i < 3) { bars[i].x0 = x0; bars[i].x1 = x1; bars[i].y = y; }
+        }
+        else if (!strcmp(kind, "cal")) sscanf(line, "cal %d %d %d %d", &cal.x0, &cal.y0, &cal.col, &cal.row);
+        else if (!strcmp(kind, "base")) sscanf(line, "base %d %d", &base_x, &base_y);
+    }
+    fclose(f);
+    snprintf(path, sizeof path, "%s/glyphs", dir);
+    f = fopen(path, "r"); if (!f) { perror("glyphs"); exit(1); }
+    int size, code; double adv;
+    while (fscanf(f, "%d %d %lf", &size, &code, &adv) == 3) {
+        int i; for (i = 0; i < ngl && gl[i].size != size; i++);
+        if (i == ngl) { if (ngl == 8) continue; gl[ngl++].size = size; }
+        if (code >= 0 && code < 256) gl[i].adv[code] = adv;
+    }
+    fclose(f);
+}
+
+static double text_width(int size, const char *s) {
+    int i; for (i = 0; i < ngl && gl[i].size != size; i++);
+    double w = 0; for (const unsigned char *p = (const unsigned char *)s; *p; p++) w += gl[i].adv[*p];
+    return w;
+}
+
+/* draw `s` in the baked glyphs of `size` with its text origin at (x, y) display px */
+static void draw_text(int size, double x, int y, const char *s) {
+    int i; for (i = 0; i < ngl && gl[i].size != size; i++);
+    if (i == ngl) { fprintf(stderr, "no glyphs of size %d\n", size); return; }
+    char name[32];
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p != ' ') { snprintf(name, sizeof name, "g%d_%d.bin", size, *p); stroke_file(name, 0, (int)lround(x) - base_x, y - base_y, -1); }
+        x += gl[i].adv[*p];
+    }
+}
+
+static void draw_at(const char *tname, const char *s, int dy) { struct text *t = T(tname); if (t) draw_text(t->size, t->x, t->y + dy, s); }
+
+/* ---------- data: HTTPS through openssl, tiny JSON scanning ---------- */
+
+static int https(const char *host, const char *request, char *out, size_t cap) {
+    const char *fx = getenv("RMDASH_FIXTURES");   /* dry runs off the tablet: canned responses */
+    if (fx) {
+        char p[600]; snprintf(p, sizeof p, "%s/%s", fx, strstr(host, "meteo") ? "weather.json" : strstr(host, "console") ? "token.json" : "usage.json");
+        FILE *f = fopen(p, "r"); if (!f) return -1;
+        size_t n = fread(out, 1, cap - 1, f); out[n] = 0; fclose(f); return 200;
+    }
+    char req[600]; snprintf(req, sizeof req, "%s/req", dir);
+    FILE *f = fopen(req, "w"); if (!f) return -1;
+    chmod(req, 0600); fputs(request, f); fclose(f);
+    char cmd[1200];
+    snprintf(cmd, sizeof cmd, "openssl s_client -quiet -ign_eof -connect %s:443 -servername %s -verify_return_error -CApath /etc/ssl/certs < %s 2>/dev/null & p=$!; "
+             "(sleep 45; kill $p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; kill $w 2>/dev/null", host, host, req);
+    FILE *pp = popen(cmd, "r"); if (!pp) return -1;
+    size_t n = fread(out, 1, cap - 1, pp); out[n] = 0; pclose(pp); unlink(req);
+    if (n < 12 || strncmp(out, "HTTP/", 5)) return -1;
+    int status = atoi(out + 9);
+    char *body = strstr(out, "\r\n\r\n");
+    if (!body) return -1;
+    memmove(out, body + 4, strlen(body + 4) + 1);
+    return status;
+}
+
+static const char *jkey(const char *s, const char *key) {   /* after `"key":` (first occurrence from s) */
+    char k[64]; snprintf(k, sizeof k, "\"%s\":", key);
+    const char *p = strstr(s, k); return p ? p + strlen(k) : NULL;
+}
+static double jnum(const char *s, const char *key, double dflt) { const char *p = jkey(s, key); return p && (*p == '-' || (*p >= '0' && *p <= '9')) ? atof(p) : dflt; }
+static int jstr(const char *s, const char *key, char *out, size_t cap) {
+    const char *p = jkey(s, key); if (!p || *p != '"') return 0;
+    p++; size_t i = 0; while (*p && *p != '"' && i < cap - 1) out[i++] = *p++; out[i] = 0; return 1;
+}
+static int jarr(const char *s, const char *key, double *out, int max) {   /* numbers (null -> -999) */
+    const char *p = jkey(s, key); if (!p || *p != '[') return 0;
+    int n = 0; p++;
+    while (*p && *p != ']' && n < max) {
+        while (*p == ' ' || *p == ',') p++;
+        if (*p == '"') { p++; while (*p && *p != '"') p++; if (*p) p++; out[n++] = 0; continue; }
+        out[n++] = (*p == 'n') ? -999 : atof(p);
+        while (*p && *p != ',' && *p != ']') p++;
+    }
+    return n;
+}
+static int jarr_str(const char *s, const char *key, char out[][12], int max) {
+    const char *p = jkey(s, key); if (!p || *p != '[') return 0;
+    int n = 0; p++;
+    while (*p && *p != ']' && n < max) {
+        while (*p == ' ' || *p == ',') p++;
+        if (*p != '"') break;
+        p++; size_t i = 0; while (*p && *p != '"' && i < 11) out[n][i++] = *p++; out[n][i] = 0; if (*p) p++; n++;
+    }
+    return n;
+}
+
+static const char *WMO(int code) {   /* WEATHER_TEXT in rm_ai.py */
+    switch (code) {
+    case 0: return "Clear"; case 1: return "Mostly clear"; case 2: return "Partly cloudy"; case 3: return "Overcast";
+    case 45: return "Fog"; case 48: return "Rime fog"; case 51: return "Light drizzle"; case 53: return "Drizzle"; case 55: return "Heavy drizzle";
+    case 56: case 57: return "Freezing drizzle"; case 61: return "Light rain"; case 63: return "Rain"; case 65: return "Heavy rain";
+    case 66: case 67: return "Freezing rain"; case 71: return "Light snow"; case 73: return "Snow"; case 75: return "Heavy snow"; case 77: return "Snow grains";
+    case 80: case 81: return "Showers"; case 82: return "Heavy showers"; case 85: case 86: return "Snow showers"; case 95: return "Thunderstorm";
+    case 96: case 99: return "Thunderstorm, hail"; default: return "?";
+    }
+}
+
+static struct { int ok; double temp, feels, wind; int code, n; char day[6][12]; double dcode[6], dmax[6], dmin[6], dpop[6]; } wx;
+static char big[65536];
+
+static void fetch_weather(void) {
+    if (lat == 0 && lon == 0) return;
+    char req[700];
+    snprintf(req, sizeof req, "GET /v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
+             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=6&wind_speed_unit=ms HTTP/1.0\r\n"
+             "Host: api.open-meteo.com\r\nUser-Agent: remarkable-ai/0.1\r\n\r\n", lat, lon);
+    int st = https("api.open-meteo.com", req, big, sizeof big);
+    const char *cur = st == 200 ? strstr(big, "\"current\":{") : NULL, *day = st == 200 ? strstr(big, "\"daily\":{") : NULL;
+    if (!cur || !day) { fprintf(stderr, "weather: HTTP %d\n", st); return; }
+    wx.temp = jnum(cur, "temperature_2m", 0); wx.feels = jnum(cur, "apparent_temperature", 0);
+    wx.code = (int)jnum(cur, "weather_code", -1); wx.wind = jnum(cur, "wind_speed_10m", 0);
+    wx.n = jarr_str(day, "time", wx.day, 6);
+    jarr(day, "weather_code", wx.dcode, 6); jarr(day, "temperature_2m_max", wx.dmax, 6); jarr(day, "temperature_2m_min", wx.dmin, 6);
+    if (!jarr(day, "precipitation_probability_max", wx.dpop, 6)) for (int i = 0; i < 6; i++) wx.dpop[i] = -999;
+    wx.ok = wx.n > 0;
+    fprintf(stderr, "weather: %.0f%c %s, %d days\n", wx.temp, 0xB0, WMO(wx.code), wx.n);
+}
+
+static time_t parse_iso(const char *s) {   /* 2026-09-08T21:59:59.530944+00:00 or ...Z -> epoch */
+    struct tm t = {0}; int off = 0, oh, om; char sign;
+    if (sscanf(s, "%d-%d-%dT%d:%d:%d", &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec) != 6) return 0;
+    t.tm_year -= 1900; t.tm_mon -= 1;
+    const char *z = s + 19; while (*z && *z != '+' && *z != '-' && *z != 'Z') z++;
+    if (sscanf(z, "%c%d:%d", &sign, &oh, &om) == 3) off = (oh * 3600 + om * 60) * (sign == '-' ? -1 : 1);
+    return timegm(&t) - off;
+}
+
+static int token_refresh(void) {
+    char refresh[600]; if (!read_kv("token", "refresh", refresh, sizeof refresh)) return 0;
+    char body[800], req[1200];
+    snprintf(body, sizeof body, "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"%s\",\"client_id\":\"9d1c250a-e61b-44d9-88ed-5944d1962f5e\"}", refresh);
+    snprintf(req, sizeof req, "POST /v1/oauth/token HTTP/1.0\r\nHost: console.anthropic.com\r\nContent-Type: application/json\r\nAccept: application/json\r\n"
+             "User-Agent: remarkable-ai/0.1\r\nContent-Length: %zu\r\n\r\n%s", strlen(body), body);
+    int st = https("console.anthropic.com", req, big, sizeof big);
+    char access[600], newref[600]; double exp = jnum(big, "expires_in", 0);
+    if (st != 200 || !jstr(big, "access_token", access, sizeof access)) { fprintf(stderr, "token renewal failed: HTTP %d\n", st); return 0; }
+    if (!jstr(big, "refresh_token", newref, sizeof newref)) strcpy(newref, refresh);
+    char path[600], tmp[600]; snprintf(path, sizeof path, "%s/token", dir); snprintf(tmp, sizeof tmp, "%s/token.tmp", dir);
+    FILE *f = fopen(tmp, "w"); if (!f) return 0;
+    chmod(tmp, 0600); fprintf(f, "access=%s\nrefresh=%s\nexpires=%ld\n", access, newref, (long)(time(NULL) + (long)exp)); fclose(f);
+    rename(tmp, path);
+    fprintf(stderr, "token renewed, valid %.1f h\n", exp / 3600);
+    return 1;
+}
+
+/* Claude usage with the tablet's own login -> the `usage` file (same format the PC writes) */
+static void fetch_usage(void) {
+    char access[600], expv[32];
+    if (!read_kv("token", "access", access, sizeof access)) return;
+    if (read_kv("token", "expires", expv, sizeof expv) && atol(expv) - time(NULL) < 600) { if (!token_refresh()) return; read_kv("token", "access", access, sizeof access); }
+    char req[1000];
+    for (int attempt = 0; attempt < 2; attempt++) {
+        snprintf(req, sizeof req, "GET /api/oauth/usage HTTP/1.0\r\nHost: api.anthropic.com\r\nAuthorization: Bearer %s\r\nanthropic-beta: oauth-2025-04-20\r\n"
+                 "anthropic-version: 2023-06-01\r\nUser-Agent: remarkable-ai/0.1\r\n\r\n", access);
+        int st = https("api.anthropic.com", req, big, sizeof big);
+        if (st == 401 && attempt == 0) { if (!token_refresh()) return; read_kv("token", "access", access, sizeof access); continue; }
+        if (st != 200) { fprintf(stderr, "usage: HTTP %d\n", st); return; }
+        break;
+    }
+    char path[600], tmp[600]; snprintf(path, sizeof path, "%s/usage", dir); snprintf(tmp, sizeof tmp, "%s/usage.tmp", dir);
+    FILE *f = fopen(tmp, "w"); if (!f) return;
+    fprintf(f, "fetched=%ld\n", (long)time(NULL));
+    int n = 0;
+    for (const char *p = strstr(big, "\"kind\":\""); p && n < 3; p = strstr(p + 1, "\"kind\":\"")) {
+        char kind[32], model[32], label[40];
+        jstr(p, "kind", kind, sizeof kind);
+        const char *next = strstr(p + 1, "\"kind\":\"");
+        const char *pc = jkey(p, "percent"); if (!pc || (next && pc > next) || !(*pc == '-' || (*pc >= '0' && *pc <= '9'))) continue;
+        const char *rs = jkey(p, "resets_at"); time_t reset = rs && (!next || rs < next) && *rs == '"' ? parse_iso(rs + 1) : 0;
+        if (!strcmp(kind, "session")) strcpy(label, "Session");
+        else if (!strcmp(kind, "weekly_all")) strcpy(label, "Week");
+        else if (!strcmp(kind, "weekly_scoped")) { const char *m = jkey(p, "display_name"); snprintf(label, sizeof label, "Week %s", m && (!next || m < next) && jstr(p, "display_name", model, sizeof model) ? model : "model"); }
+        else snprintf(label, sizeof label, "%.12s", kind);
+        fprintf(f, "label%d=%s\npct%d=%d\nreset%d=%ld\n", n, label, n, (int)lround(atof(pc)), n, (long)reset); n++;
+    }
+    fprintf(f, "n=%d\n", n); fclose(f); rename(tmp, path);
+    fprintf(stderr, "usage: %d rows\n", n);
+}
+
+/* ---------- what the page should show ---------- */
+
+static void upper(char *s) { for (; *s; s++) if (*s >= 'a' && *s <= 'z') *s -= 32; }
+
+static void want_all(char want[NZ][512], struct tm *lt) {
+    strftime(want[0], 512, "%H:%M", lt);
+    strftime(want[1], 512, "%A, %B %d, %Y", lt); upper(want[1]);
+    strftime(want[2], 512, "%B %Y", lt); upper(want[2]);
+    strftime(want[3], 512, "%Y-%m-%d", lt);
+    for (int i = 0; i < 3; i++) {
+        char k[8], pct[16], reset[32]; snprintf(k, sizeof k, "pct%d", i);
+        if (!read_kv("usage", k, pct, sizeof pct)) { want[4 + i][0] = 0; continue; }
+        snprintf(k, sizeof k, "reset%d", i); read_kv("usage", k, reset, sizeof reset);
+        time_t r = atol(reset); struct tm rt; localtime_r(&r, &rt);
+        char dow[8], hm[8]; strftime(dow, sizeof dow, "%a", &rt); upper(dow); strftime(hm, sizeof hm, "%H:%M", &rt);
+        snprintf(want[4 + i], 512, "%d|%s|%s", atoi(pct), r ? dow : "", r ? hm : "");
+    }
+    if (!wx.ok) { want[7][0] = 0; return; }
+    int n = 0;
+    n += snprintf(want[7] + n, 512 - n, "%.0f\xB0|%s|H %.0f\xB0  L %.0f\xB0", wx.temp, WMO(wx.code), wx.dmax[0], wx.dmin[0]);
+    if (wx.dpop[0] > -999) n += snprintf(want[7] + n, 512 - n, "  rain %.0f%%", wx.dpop[0]);
+    for (int i = 1; i < wx.n && i < 6; i++) {
+        struct tm d = {0}; sscanf(wx.day[i], "%d-%d-%d", &d.tm_year, &d.tm_mon, &d.tm_mday); d.tm_year -= 1900; d.tm_mon -= 1; d.tm_hour = 12;
+        time_t tt = mktime(&d); localtime_r(&tt, &d); char dow[8]; strftime(dow, sizeof dow, "%a", &d); upper(dow);
+        n += snprintf(want[7] + n, 512 - n, "|%s|%s|%.0f\xB0/%.0f\xB0|", dow, WMO((int)wx.dcode[i]), wx.dmax[i], wx.dmin[i]);
+        if (wx.dpop[i] > -999) n += snprintf(want[7] + n, 512 - n, "%.0f%%", wx.dpop[i]);
+    }
+}
+
+static void draw_zone(int z, const char *want, struct tm *lt) {
+    char buf[512]; strncpy(buf, want, sizeof buf - 1); buf[511] = 0;
+    if (z == 0) draw_at("clock", buf, 0);
+    else if (z == 1) draw_at("date", buf, 0);
+    else if (z == 2) draw_at("caltitle", buf, 0);
+    else if (z == 3) {
+        struct text *t = T("cal"); if (!t) return;
+        struct tm first = *lt; first.tm_mday = 1; first.tm_hour = 12; time_t ft = mktime(&first); localtime_r(&ft, &first);
+        int col = (first.tm_wday + 6) % 7, row = 0;                 /* Monday first */
+        struct tm nxt = first; nxt.tm_mon++; time_t nt = mktime(&nxt); int ndays = (int)((nt - ft) / 86400 + 0.5);
+        for (int d = 1; d <= ndays; d++) {
+            char s[8]; snprintf(s, sizeof s, "%d", d);
+            int cx = cal.x0 + col * cal.col, cy = cal.y0 + row * cal.row;
+            draw_text(t->size, cx - text_width(t->size, s) / 2, cy - t->size * 0.55, s);
+            if (d == lt->tm_mday) stroke_file("ring.bin", 0, cx - base_x, cy - base_y, -1);
+            if (++col == 7) { col = 0; row++; }
+        }
+    } else if (z >= 4 && z <= 6) {
+        int i = z - 4; char *p = strtok(buf, "|"); if (!p) return;
+        int pct = atoi(p); char *dow = strtok(NULL, "|"), *hm = strtok(NULL, "|");
+        char name[16], s[8]; snprintf(name, sizeof name, "bar%d.bin", i);
+        if (pct > 0) stroke_file(name, 0, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100);
+        snprintf(s, sizeof s, "%d", pct); snprintf(name, sizeof name, "pct%d", i); draw_at(name, s, 0);
+        snprintf(name, sizeof name, "reset%d", i);
+        if (dow) draw_at(name, dow, 0);
+        if (hm) draw_at(name, hm, 52);
+    } else if (z == 7) {
+        char *temp = strtok(buf, "|"), *text = strtok(NULL, "|"), *line = strtok(NULL, "|");
+        if (temp) draw_at("temp", temp, 0);
+        if (text) draw_at("wtext", text, 0);
+        if (line) draw_at("wline", line, 0);
+        for (int r = 0; r < 5; r++) {
+            char *dow = strtok(NULL, "|"), *wt = strtok(NULL, "|"), *tt = strtok(NULL, "|"), *pop = strtok(NULL, "|");
+            if (!dow || !wt || !tt) break;
+            draw_at("fcdow", dow, 56 * r); draw_at("fctext", wt, 56 * r); draw_at("fctemp", tt, 56 * r);
+            if (pop && *pop) draw_at("fcpop", pop, 56 * r);
+        }
+    }
+}
+
+static void save_state(char shown[NZ][512], long rm_mtime) {
+    char path[600]; snprintf(path, sizeof path, "%s/state", dir);
+    FILE *f = fopen(path, "w"); if (!f) return;
+    fprintf(f, "rm=%ld\n", rm_mtime);
+    for (int z = 0; z < NZ; z++) fprintf(f, "zone_%s=%s\n", ZONES[z], shown[z]);
+    fclose(f);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: rmdash <dir> [xochitl.conf] [event device]\n"); return 1; }
+    strncpy(dir, argv[1], sizeof dir - 1);
+    parse_dev_args(argc, argv);
+    if (!read_kv("config", "doc", doc, sizeof doc)) { fprintf(stderr, "config: no doc=\n"); return 1; }
+    read_kv("config", "rm", rmfile, sizeof rmfile);
+    read_kv("config", "city", city, sizeof city);
+    if (read_kv("config", "lat", tmpv, sizeof tmpv)) lat = atof(tmpv);
+    if (read_kv("config", "lon", tmpv, sizeof tmpv)) lon = atof(tmpv);
+    if (read_kv("config", "minutes", tmpv, sizeof tmpv)) minutes = atol(tmpv);
+    if (minutes < 1) minutes = 1;
+    read_layout();
+    use_pc_timezone();
+    setvbuf(stderr, NULL, _IOLBF, 0);
+    static char shown[NZ][512], want[NZ][512];
+    int active = 0, lost = 0;
+    time_t fetched = 0;
+    struct ink ink = {0};
+    while (1) {
+        int is_open = doc_open(doc);
+        if (!is_open) lost = 0;
+        if (!is_open || lost) {
+            if (active) {
+                fprintf(stderr, "dashboard closed, stopping\n");
+                close_device(); active = 0;
+                sleep(3);                                   /* xochitl saves the page on close; remember that version */
+                save_state(shown, mtime(rmfile));
+            }
+            sleep(2);
+            continue;
+        }
+        if (!active) {
+            fprintf(stderr, "dashboard open, starting\n");
+            if (!open_device()) { sleep(5); continue; }
+            char saved[32]; int same = read_kv("state", "rm", saved, sizeof saved) && atol(saved) == mtime(rmfile) && atol(saved) != 0;
+            for (int z = 0; z < NZ; z++) { char k[24]; snprintf(k, sizeof k, "zone_%s", ZONES[z]); if (!same || !read_kv("state", k, shown[z], 512)) shown[z][0] = 0; }
+            if (!same && mtime(rmfile) == 0) fprintf(stderr, "fresh page, nothing to erase\n");   /* a pushed page has no strokes yet */
+            else if (!same) {                               /* the page changed since we last drew: clean every zone */
+                fprintf(stderr, "page changed since last time, erasing all zones\n");
+                char name[32];
+                for (int z = 0; z < NZ; z++) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
+                hover(START_SETTLE_US);
+            } else fprintf(stderr, "page unchanged since last time, keeping what is drawn\n");
+            active = 1;
+            ink_reset(&ink, rmfile);
+        }
+        if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); }
+        time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
+        want_all(want, &lt);
+        int changed[NZ], any = 0; char name[32];
+        for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
+        for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
+        if (any) hover(START_SETTLE_US);
+        for (int z = 0; z < NZ; z++) if (changed[z]) { draw_zone(z, want[z], &lt); strcpy(shown[z], want[z]); fprintf(stderr, "%s: %s\n", ZONES[z], want[z]); }
+        if (ink_lost(&ink)) { lost = 1; continue; }
+        long wait = 60 - (long)(time(NULL) % 60);
+        while (wait > 0 && doc_open(doc)) { nap(2000000); wait -= 2; }
+    }
+}

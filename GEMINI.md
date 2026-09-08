@@ -12,7 +12,7 @@ Whenever the user inputs any of the following triggers (with or without a leadin
 - **`rm-export [name] [--page N]`** or **`/rm-export`**: Export the note to a Markdown file in `notes/` with embedded vector drawings in `notes/assets/`, full AI transcript, Mermaid diagram, and action items.
 - **`rm-push <file> [--folder name]`** or **`/rm-push`**: Upload a PDF or Markdown document wirelessly to the tablet, automatically creating any missing remote folders.
 - **`rm-clock [--pos pos] [--thickness N] [--frame] [--interval N]`** or **`/rm-clock`**: Launch the live digital clock drawn on the open page with the tablet's pen (runs until stopped; `--once` for a single stamp; `--install` makes it run on the tablet itself whenever the Clock document is open).
-- **`rm-dashboard [--city name] [--mode standby|doc] [--live] [--suspend]`** or **`/rm-dashboard`**: Put the dashboard on the tablet: sleep screen by default (date, calendar, weather, Claude usage, battery), a notebook page with `--mode doc`, or a live page kept current by the pen with `--mode doc --live`.
+- **`rm-dashboard [--city name] [--mode standby|doc] [--live] [--suspend]`** or **`/rm-dashboard`**: Put the dashboard on the tablet: sleep screen by default (date, calendar, weather, Claude usage, battery), a notebook page with `--mode doc`, or a live page kept current by the pen with `--mode doc --live`; `--install` makes the tablet keep that page current by itself.
 - **`rm-draw <shape> [args]`** or **`/rm-draw`**: Inject live vector strokes directly into the tablet screen in real time.
 - **`rm-setup`** or **`/rm-setup`**: Run `rm-ai setup` to refresh agent skills and commands.
 

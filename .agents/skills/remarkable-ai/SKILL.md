@@ -31,6 +31,7 @@ When the user asks for a desk clock, standby dashboard, weather, Claude usage or
 - Run: `rm-ai dashboard --city <city>` (sleep-screen dashboard: date, calendar, weather, Claude usage, battery; no reload)
 - Run: `rm-ai dashboard --suspend` (put the tablet to sleep so it shows right away)
 - Run: `rm-ai dashboard --mode doc --live` (a notebook page kept current by the pen: HH:MM every minute, usage rows as they change)
+- Run: `rm-ai dashboard --install` (the same page kept current by the tablet itself, no PC; Claude usage needs a tablet-own login, see README)
 
 ### 4. Real-Time Digital Clock & Live Vector Drawing:
 - Clock on the open page: `rm-ai clock` (saved defaults) or e.g. `rm-ai clock --pos center --thickness 28 --frame --interval 2`

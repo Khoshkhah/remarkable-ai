@@ -232,6 +232,28 @@ Things the tablet decides, not the tool: after "Erase all" the eraser stays the 
 every stroke erases, so tap the pen first; the pencil gets both darker and wider with pressure; the
 page must stay open and the tablet awake.
 
+### Dashboard that runs on the tablet itself (`rm-ai dashboard --install`)
+
+`rm-ai dashboard --install` pushes a **Dashboard** page into the tablet's **app** folder and installs a
+small program that keeps it current whenever the page is open, with no PC: the time every minute,
+the date, the month calendar with today ringed, the weather (the tablet asks Open-Meteo itself) and
+the three Claude usage rows. Everything is drawn with the pen in the page's own font, so nothing
+ever reloads; reopening an unchanged page continues where it left off, a page you wrote on is
+cleaned zone by zone first.
+
+Claude usage needs a login. A login cannot be shared: renewing it from a second device logs the
+first one out at once (measured). So give the tablet a login of its own, made by Claude Code itself:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-tablet claude      # log in with your Claude account, then /exit
+rm-ai dashboard --install                      # picks up ~/.claude-tablet/.credentials.json
+```
+
+The tablet keeps that token (root-only file) and renews it by itself; never run Claude Code with
+that folder again, or the tablet's copy stops working. Without a tablet login the usage rows are
+fed by this PC's dashboard cron every 15 minutes instead. `rm-ai dashboard --uninstall` removes it;
+the log is `ssh root@<tablet> journalctl -u rmdash -f`.
+
 ### Clock that runs on the tablet itself (`rm-ai clock --install`)
 
 `rm-ai clock --install` puts the clock on the tablet, so it needs no PC afterwards: whenever you

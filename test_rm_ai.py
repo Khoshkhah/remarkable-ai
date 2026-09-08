@@ -139,6 +139,28 @@ def test_baked_clock_strokes_are_the_live_strokes_under_the_names_the_replayer_e
             assert evs[0] == (rm_ai.EV_KEY, tool, 1) and evs[-2] == (rm_ai.EV_KEY, tool, 0) and evs[-1][0] == rm_ai.EV_SYN
 
 
+def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects():
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        rm_ai.bake_dash_app(out, 12, 70, 4000)
+        names = {p.name for p in out.iterdir()}
+        for size, chars in rm_ai.GLYPH_SETS.items():
+            assert all(f"g{size}_{ord(c)}.bin" in names for c in chars), size
+        assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])
+        assert {"bar0.bin", "bar1.bin", "bar2.bin", "ring.bin", "layout", "glyphs"} <= names
+        glyphs = {(int(a), int(b)): float(c) for a, b, c in (l.split() for l in (out / "glyphs").read_text().splitlines())}
+        assert glyphs[(44, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(44, ord("0"))] > glyphs[(30, ord("0"))]
+        layout = (out / "layout").read_text()
+        assert f"base {rm_ai.GLYPH_BASE[0]} {rm_ai.GLYPH_BASE[1]}" in layout and "text clock 190 80 115" in layout and "bar 0 278 521 1013" in layout
+        # a glyph is baked at the base origin: its first pen-down lands near it
+        evs = events((out / "g190_48.bin").read_bytes())
+        first_y = next(v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y)
+        assert abs(first_y * 1404 / 15725 - rm_ai.GLYPH_BASE[0]) < 40
+    assert rm_ai.usage_file_text({"windows": [("Session", 12.4, "2026-09-08T21:59:59+00:00")]}).count("\n") == 5
+
+
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
     test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours()
@@ -146,4 +168,5 @@ if __name__ == "__main__":
     test_weather_summary_from_the_open_meteo_shape()
     test_box_detection_accepts_rectangles_and_rejects_lines_and_loops()
     test_baked_clock_strokes_are_the_live_strokes_under_the_names_the_replayer_expects()
+    test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects()
     print("ok")
