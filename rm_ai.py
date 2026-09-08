@@ -756,6 +756,20 @@ def cmd_devices(args):
             print(f"Unknown device '{target}'. Available: {list(devices.keys())}")
         return
 
+    # If no devices configured, offer setup wizard
+    if not devices:
+        print("\nNo reMarkable tablets are configured yet.")
+        try:
+            ans = input("Would you like to connect your tablet now? [Y/n]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if ans in ("", "y", "yes"):
+            setup_wizard()
+        else:
+            print("Run 'rm-ai setup' or 'rm-ai add-device' anytime to connect your tablet.\n")
+        return
+
     # If interactive selection requested
     print("\nConfigured reMarkable Tablets:")
     dev_keys = list(devices.keys())
