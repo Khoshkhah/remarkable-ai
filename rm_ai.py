@@ -9,6 +9,7 @@ import struct
 import time
 import calendar
 import math
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -882,6 +883,10 @@ ABS_TILT_Y = 27
 READER_CMD = "cat /dev/input/event1 & p=$!; cat >/dev/null; kill $p"
 
 
+class PageChanged(Exception):
+    """Raised by the stylus when its guard says the page it draws on is no longer the one on screen."""
+
+
 class VirtualStylus:
     """Emulates real-time stylus input on reMarkable 2 Wacom I2C Digitizer (/dev/input/event1).
 
@@ -908,6 +913,8 @@ class VirtualStylus:
         self.reader = None       # second SSH stream reading the digitizer back, to notice the real pen
         self.sent = {}           # (type, code, value) -> time we injected it, to tell our echo from the real pen
         self.real_until = 0.0    # time until which the real pen is considered near the screen
+        self.guard = None        # optional callable: False means the target page is no longer on screen
+        self.recheck = False     # set when the real pen was seen (it may have tapped its way elsewhere)
 
     def connect(self):
         if self.proc:
@@ -947,6 +954,7 @@ class VirtualStylus:
             if time.time() >= self.real_until:
                 print("✋ real pen near the screen, pausing", flush=True)
             self.real_until = time.time() + self.YIELD_SECONDS
+            self.recheck = True
 
     def pen_near(self):
         return time.time() < self.real_until
@@ -1018,6 +1026,10 @@ class VirtualStylus:
         pressure = max(1, min(4095, pressure))   # the digitizer's 12-bit range
         while True:
             self.wait_for_pen_gone()
+            if self.recheck and self.guard:
+                self.recheck = False
+                if not self.guard():
+                    raise PageChanged()
             if self._send_stroke(points, tool, pressure, is_eraser):
                 return
             # the real pen appeared mid-stroke: we lifted; wait, then redraw this stroke from the start
@@ -1992,28 +2004,59 @@ def text_strokes(text, size, x, y, pitch, bold=True):
     return strokes
 
 
-def wait_for_open(host, doc_uuid, since, timeout=180):
-    """Wait until the tablet opens the document (its metadata gets a lastOpened after `since`);
-    timeout None waits forever."""
-    while timeout is None or time.time() - since < timeout:
-        try:
-            meta = json.loads(run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.metadata", host=host))
-            if int(meta.get("lastOpened", "0")) / 1000 > since - 5:
-                return True
-        except Exception:
-            pass
+def wait_until_open(host, doc_uuid, what="the document"):
+    """Block until `doc_uuid` is the document on screen (polls xochitl's LastOpen every 3 s)."""
+    if open_document(host) == doc_uuid:
+        return
+    print(f"⏳ Waiting for {what} to be open on the tablet...", flush=True)
+    while open_document(host) != doc_uuid:
         time.sleep(3)
-    return False
+    print(f"▶ {what} is open", flush=True)
+
+
+class TouchWatcher:
+    """Notes the last time a finger touched the screen (pages are turned by finger); the live
+    dashboard then requires a fresh confirmation before drawing again."""
+
+    def __init__(self, host):
+        self.touched_at = 0.0
+        self.proc = subprocess.Popen(["ssh"] + get_ssh_base_opts() + [host, READER_CMD.replace("event1", "event2")],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        import threading
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def _watch(self):
+        while self.proc and self.proc.poll() is None:
+            if len(self.proc.stdout.read(16)) < 16:
+                break
+            self.touched_at = time.time()
+
+    def close(self):
+        if self.proc:
+            self.proc.kill()
+            self.proc = None
+
+
+def open_document(host):
+    """UUID of the document open on the tablet: xochitl writes it to its config as LastOpen."""
+    try:
+        line = run_ssh("grep -m1 '^LastOpen=' /home/root/.config/remarkable/xochitl.conf", host=host)
+        m = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27})", line)
+        return m.group(1) if m else None
+    except Exception:
+        return None
 
 
 LIVE_CLOCK_ZONE = (66, 100, 800, 320)     # swept clean before each redraw of the big HH:MM (font 190 at 80,115)
 
 
-def run_live_dashboard(host, usage_minutes, repush=None):
-    """Keep the open dashboard page current with the pen, in the page's own font: every minute sweep
-    the clock zone clean and write HH:MM again; every `usage_minutes` do the same for usage rows whose
-    value changed (bar + percentage). All erasing first, then one long pause (xochitl drops strokes
-    while still busy erasing, longest on PDF pages), then all drawing."""
+def run_live_dashboard(host, usage_minutes, doc_uuid, repush=None):
+    """Keep the dashboard page current with the pen, in the page's own font: every minute sweep the
+    clock zone clean and write HH:MM again; every `usage_minutes` do the same for usage rows whose
+    value changed. All erasing first, then one long pause (xochitl drops strokes while still busy
+    erasing, longest on PDF pages), then all drawing. It only ever draws while xochitl reports the
+    dashboard as the open document: checked before each cycle, after any finger touch, and, through
+    the stylus guard, after any real-pen activity mid-cycle."""
     saved = load_config().get("clock_defaults", {})
     pressure = max(1, min(4095, saved.get("pressure", 2500)))
     ink = saved.get("ink_width") or saved.get("pen_width") or 12
@@ -2022,8 +2065,10 @@ def run_live_dashboard(host, usage_minutes, repush=None):
     import signal
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     stylus.connect()
-    shown, last_usage, rows, rows_shown = None, 0, [], [None, None, None]
-    shown_date = datetime.now().date()
+    touch = TouchWatcher(host)
+    stylus.guard = lambda: open_document(host) == doc_uuid
+    st = {"shown": None, "rows": [], "rows_shown": [None, None, None], "last_usage": 0.0,
+          "checked_at": time.time(), "date": datetime.now().date(), "doc": doc_uuid}
 
     def reset_lines(resets_at):
         """('TUE', '08:00') in local time from the endpoint's ISO timestamp, or () when unknown."""
@@ -2032,64 +2077,75 @@ def run_live_dashboard(host, usage_minutes, repush=None):
             return (local.strftime("%a").upper(), local.strftime("%H:%M"))
         except (AttributeError, ValueError, TypeError):
             return ()
+
+    def cycle(time_str, changed_rows):
+        if time_str == st["shown"] and not changed_rows:
+            return
+        # 1. all erasing: one sweep per zone
+        if time_str != st["shown"]:
+            stylus.stroke(sweep_path(*LIVE_CLOCK_ZONE), is_eraser=True, pressure=4000)
+        for i in changed_rows:
+            y = LIVE_USAGE_ROWS[i]
+            stylus.stroke(sweep_path(95, y - 4, 535, y + 185), is_eraser=True, pressure=4000)
+        # 2. let xochitl finish erasing before any pen stroke
+        stylus.hover((LIVE_CLOCK_ZONE[0], LIVE_CLOCK_ZONE[1]), DigitalClock.START_SETTLE)
+        # 3. all drawing, in the page's font
+        if time_str != st["shown"]:
+            for path in text_strokes(time_str, 190, 80, 115, pitch):
+                stylus.stroke(path, pressure=pressure)
+            st["shown"] = time_str
+            print(f"  ⏰ {time_str}", flush=True)
+        for i in changed_rows:
+            y, (pct, reset) = LIVE_USAGE_ROWS[i], st["rows"][i]
+            if pct > 0:
+                x0, x1 = LIVE_BAR_X
+                stylus.stroke([(x0, y + 13), (x0 + (x1 - x0) * pct / 100, y + 13)], pressure=pressure)
+            for path in text_strokes(str(pct), 110, 105, y + 45, pitch):
+                stylus.stroke(path, pressure=pressure)
+            for line, text in enumerate(reset):   # e.g. TUE / 08:00, smaller, right of the "%"
+                # lighter pressure: the pencil line gets thin enough for 44px letters to stay legible
+                for path in text_strokes(text, 44, 335, y + 60 + 52 * line, max(4, pitch // 2)):
+                    stylus.stroke(path, pressure=max(800, int(pressure * 0.55)))
+            st["rows_shown"][i] = st["rows"][i]
+        if changed_rows:
+            print("  🤖 " + "  •  ".join(f"{'Session' if i == 0 else 'Week' if i == 1 else 'Week Fable'} {p}%" for i, (p, _) in enumerate(st["rows"])), flush=True)
+
     try:
         while True:
-            if repush and datetime.now().date() != shown_date:
+            if repush and datetime.now().date() != st["date"]:
                 # the printed date, calendar and week number are stale: re-render and push the template
-                # (one reload a day), then draw nothing until the document is open on the tablet again
+                # (one reload a day), then draw nothing until the dashboard is the open document again
                 print("  📅 New day: pushing a fresh template (the tablet reloads once)...", flush=True)
                 stylus.close()
-                pushed_at = time.time()
-                doc_uuid = repush()
-                shown_date = datetime.now().date()
-                # xochitl restores the open document after its restart without touching lastOpened, so
-                # wait for a fresh lastOpened only briefly, then carry on
-                wait_for_open(host, doc_uuid, pushed_at, timeout=90)
+                st["doc"] = doc_uuid = repush()
+                stylus.guard = lambda: open_document(host) == doc_uuid
+                st["date"] = datetime.now().date()
+                wait_until_open(host, doc_uuid, "the dashboard")
                 stylus.connect()
-                shown, rows_shown = None, [None, None, None]   # the fresh page has no strokes: redraw all
+                st["shown"], st["rows_shown"] = None, [None, None, None]   # the fresh page has no strokes
+            if touch.touched_at > st["checked_at"] or open_document(host) != doc_uuid:   # never draw elsewhere
+                wait_until_open(host, doc_uuid, "the dashboard")
+            st["checked_at"] = time.time()
             time_str = datetime.now().strftime("%H:%M")
             changed_rows = []
-            if time.time() - last_usage >= usage_minutes * 60:
+            if time.time() - st["last_usage"] >= usage_minutes * 60:
                 sub = fetch_claude_subscription_usage()
                 if sub and "windows" in sub:
-                    rows = [(max(0, min(100, round(float(p)))), reset_lines(r)) for _, p, r in sub["windows"]][:3]
-                    changed_rows = [i for i, row in enumerate(rows) if rows_shown[i] != row]
+                    st["rows"] = [(max(0, min(100, round(float(p)))), reset_lines(r)) for _, p, r in sub["windows"]][:3]
+                    changed_rows = [i for i, row in enumerate(st["rows"]) if st["rows_shown"][i] != row]
                 else:
                     print(f"  ⚠️  usage not updated: {(sub or {}).get('error', 'no Claude Code login')}", flush=True)
-                last_usage = time.time()
-            if time_str != shown or changed_rows:
-                # 1. all erasing: one sweep per zone
-                if time_str != shown:
-                    stylus.stroke(sweep_path(*LIVE_CLOCK_ZONE), is_eraser=True, pressure=4000)
-                for i in changed_rows:
-                    y = LIVE_USAGE_ROWS[i]
-                    stylus.stroke(sweep_path(95, y - 4, 535, y + 185), is_eraser=True, pressure=4000)
-                # 2. let xochitl finish erasing before any pen stroke
-                stylus.hover((LIVE_CLOCK_ZONE[0], LIVE_CLOCK_ZONE[1]), DigitalClock.START_SETTLE)
-                # 3. all drawing, in the page's font
-                if time_str != shown:
-                    for path in text_strokes(time_str, 190, 80, 115, pitch):
-                        stylus.stroke(path, pressure=pressure)
-                    shown = time_str
-                    print(f"  ⏰ {time_str}", flush=True)
-                for i in changed_rows:
-                    y, (pct, reset) = LIVE_USAGE_ROWS[i], rows[i]
-                    if pct > 0:
-                        x0, x1 = LIVE_BAR_X
-                        stylus.stroke([(x0, y + 13), (x0 + (x1 - x0) * pct / 100, y + 13)], pressure=pressure)
-                    for path in text_strokes(str(pct), 110, 105, y + 45, pitch):
-                        stylus.stroke(path, pressure=pressure)
-                    for line, text in enumerate(reset):   # e.g. TUE / 08:00, smaller, right of the "%"
-                        # lighter pressure: the pencil line gets thin enough for 44px letters to stay legible
-                        for path in text_strokes(text, 44, 335, y + 60 + 52 * line, max(4, pitch // 2)):
-                            stylus.stroke(path, pressure=max(800, int(pressure * 0.55)))
-                    rows_shown[i] = rows[i]
-                if changed_rows:
-                    print("  🤖 " + "  •  ".join(f"{l} {float(p):.0f}%" for l, p, _ in sub["windows"]), flush=True)
+                st["last_usage"] = time.time()
+            try:
+                cycle(time_str, changed_rows)
+            except PageChanged:
+                print("⏸ the page changed mid-cycle; everything is redrawn once the dashboard is back", flush=True)
+                st["shown"], st["rows_shown"] = None, [None, None, None]
             time.sleep(max(1, 60 - time.time() % 60))
     except KeyboardInterrupt:
         print("\nLive dashboard stopped.", flush=True)
     finally:
+        touch.close()
         stylus.close()
 
 
@@ -2201,11 +2257,35 @@ poll();
 </script>"""
 
 
+def push_chat_document(host, title, pages=10):
+    """Push `pages` blank pages (a small header each) as the chat document; returns its uuid."""
+    from PIL import Image, ImageDraw
+    ims = []
+    for i in range(pages):
+        im = Image.new("L", (1404, 1872), 255)
+        d = ImageDraw.Draw(im)
+        d.text((80, 60), f"{title.upper()}  •  page {i + 1}", font=get_font(22, bold=True), fill=120)
+        d.line([(80, 100), (1324, 100)], fill=200, width=2)
+        ims.append(im)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        pdf = f.name
+    ims[0].save(pdf, "PDF", resolution=226.0, save_all=True, append_images=ims[1:])
+    uuid_ = cmd_push(argparse.Namespace(file=pdf, folder=None, title=title, force_new=False, margins=0, fresh=True, device=None))
+    os.unlink(pdf)
+    return uuid_
+
+
 def cmd_chat(args):
-    """Stage 1: detect boxed handwriting live and show it on a local web page; nothing is written back."""
+    """Stage 1: detect looped handwriting on the chat document live and show it on a local web page;
+    nothing is written back yet."""
     import http.server
     import threading
     host = get_active_host(getattr(args, "device", None))
+    title = args.doc
+    doc_uuid = next((nb["uuid"] for nb in list_notebooks(host) if nb["title"].lower() == title.lower() and nb["folder"] == "/"), None)
+    if doc_uuid is None or getattr(args, "push", False):
+        print(f"📄 Pushing the '{title}' document (the tablet reloads once)...", flush=True)
+        doc_uuid = push_chat_document(host, title)
     out = Path(args.dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(CHAT_PAGE)
@@ -2234,6 +2314,9 @@ def cmd_chat(args):
             return
         for s in content:
             strokes.remove(s)
+        if open_document(host) != doc_uuid:   # xochitl's LastOpen names the document on screen
+            print(f"▢ loop drawn while another document is open (not '{title}'), ignored", flush=True)
+            return
         n = len(boxes) + 1
         image = f"box-{n}.png"
         render_strokes(content, box, out / image)
@@ -2248,12 +2331,16 @@ def cmd_chat(args):
             pass
     server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Quiet)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"🌐 http://localhost:{args.port}  —  write on the page, then draw a box around it; Ctrl+C to stop", flush=True)
+    print(f"🌐 http://localhost:{args.port}  —  on the '{title}' document: write, then draw a loop around it; Ctrl+C to stop", flush=True)
+    wait_until_open(host, doc_uuid, f"the '{title}' document")
     reader = PenReader(host, on_stroke)
     import signal
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
-        reader.run()
+        while True:
+            reader.run()   # returns when the connection drops (the tablet's app restart closes SSH sessions)
+            print("⚠️  pen stream closed by the tablet, reconnecting in 3 s...", flush=True)
+            time.sleep(3)
     except KeyboardInterrupt:
         pass
     finally:
@@ -2426,21 +2513,24 @@ def cmd_dashboard(args):
             return uuid_
 
         if live and getattr(args, "no_push", False):
-            print("Using the dashboard page already on the tablet (no push); make sure it is open.", flush=True)
-            run_live_dashboard(target_host, getattr(args, "usage_interval", 5), repush=push_template)
+            print("Using the dashboard page already on the tablet (no push).", flush=True)
+            doc_uuid = next((nb["uuid"] for nb in list_notebooks(target_host) if nb["title"].lower() == title.lower() and nb["folder"] == "/"), None)
+            if not doc_uuid:
+                print(f"❌ No document '{title}' on the tablet; run without --no-push first.")
+                return
+            wait_until_open(target_host, doc_uuid, "the dashboard")
+            run_live_dashboard(target_host, getattr(args, "usage_interval", 5), doc_uuid, repush=push_template)
             return
         try:
             os.unlink(temp_pdf)
         except Exception:
             pass
-        pushed_at = time.time()
         doc_uuid = push_template()
         print(f"Daily Dashboard notebook created! Open it on your tablet to write notes with your stylus.")
         if live and doc_uuid:
-            print(f"📄 Open '{title}' on the tablet now; the clock and usage bars start once it is open (waiting up to 3 min)...", flush=True)
-            if not wait_for_open(target_host, doc_uuid, pushed_at):
-                print("   Could not tell whether it is open; starting anyway.", flush=True)
-            run_live_dashboard(target_host, getattr(args, "usage_interval", 5), repush=push_template)
+            print(f"📄 Open '{title}' on the tablet.", flush=True)
+            wait_until_open(target_host, doc_uuid, "the dashboard")
+            run_live_dashboard(target_host, getattr(args, "usage_interval", 5), doc_uuid, repush=push_template)
 
 
 def main():
@@ -2524,6 +2614,8 @@ def main():
     p_chat = subparsers.add_parser("chat", help="Chat on the page: box your handwriting to send it (stage 1: detect and show on a local web page)")
     p_chat.add_argument("--dir", type=str, default="chat", help="Folder for the rendered messages and the web page (default ./chat)")
     p_chat.add_argument("--port", type=int, default=8765, help="Local web page port (default 8765)")
+    p_chat.add_argument("--doc", type=str, default="Chat", help="Title of the chat document on the tablet (pushed as blank pages if missing; default Chat)")
+    p_chat.add_argument("--push", action="store_true", help="Push the chat document again (fresh blank pages), reloading the tablet")
     p_chat.set_defaults(func=cmd_chat)
 
     # dashboard

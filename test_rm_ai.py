@@ -16,7 +16,7 @@ def events(buf):
 
 def test_stroke_is_resampled_hovered_and_lifted():
     st = rm_ai.VirtualStylus.__new__(rm_ai.VirtualStylus)
-    st.proc, st.tool, st.FRAME_DT, st.real_until, st.sent = FakeProc(), None, 0, 0.0, {}
+    st.proc, st.tool, st.FRAME_DT, st.real_until, st.sent, st.guard, st.recheck = FakeProc(), None, 0, 0.0, {}, None, False
     st.stroke([(100, 100), (500, 100)], is_eraser=False, pressure=2500)
     evs = events(st.proc.stdin.getvalue())
     xs = [v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y]  # ABS_Y is the horizontal axis
