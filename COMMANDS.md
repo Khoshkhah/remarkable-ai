@@ -1,4 +1,4 @@
-# 📋 reMarkable AI Command & Slash-Command Specification
+# reMarkable AI Command & Slash-Command Specification
 
 This document defines the complete catalog of commands available across:
 - **Claude Code**: Native slash commands (e.g. `/rm-read`)

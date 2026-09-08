@@ -1,4 +1,4 @@
-# 📝 remarkable-ai
+# remarkable-ai
 
 > **Wireless AI Assistant, Multi-Device Manager, and Agent Slash Commands for reMarkable Tablets**
 
@@ -6,19 +6,19 @@ Connect your reMarkable tablets wirelessly to **Claude, Gemini, and ChatGPT** ov
 
 ---
 
-## ✨ Features
+## Features
 
-- 📶 **100% Wireless**: Communicates over local Wi-Fi via SSH key authentication.
-- 📱 **Multi-Device Support**: Manage, switch between, and target multiple reMarkable tablets (e.g. Primary and Secondary) seamlessly.
-- 🖋️ **v6 Vector Parsing**: Renders `.rm` lines files directly into crisp PNG and SVG vector images.
-- 🤖 **Multi-Model Vision**: Works seamlessly with Anthropic Claude 3.7/3.5 Sonnet, Google Gemini 2.5/2.0, and OpenAI GPT-4o.
-- ⚡ **Claude Code Slash Commands**: Use `/rm-read`, `/rm-tasks`, and `/rm-list` directly inside Claude Code.
-- 🧠 **Antigravity / Gemini Skills**: Native Agent Skill ready for autonomous agent execution.
-- 📓 **Obsidian Ready**: Export notes and diagrams directly into Obsidian markdown vaults.
+- **100% Wireless**: Communicates over local Wi-Fi via SSH key authentication.
+- **Multi-Device Support**: Manage, switch between, and target multiple reMarkable tablets (e.g. Primary and Secondary) seamlessly.
+- **v6 Vector Parsing**: Renders `.rm` lines files directly into crisp PNG and SVG vector images.
+- **Multi-Model Vision**: Works seamlessly with Anthropic Claude 3.7/3.5 Sonnet, Google Gemini 2.5/2.0, and OpenAI GPT-4o.
+- **Claude Code Slash Commands**: Use `/rm-read`, `/rm-tasks`, and `/rm-list` directly inside Claude Code.
+- **Antigravity / Gemini Skills**: Native Agent Skill ready for autonomous agent execution.
+- **Obsidian Ready**: Export notes and diagrams directly into Obsidian markdown vaults.
 
 ---
 
-## 📱 Multi-Device Configuration
+## Multi-Device Configuration
 
 `remarkable-ai` supports multiple tablets connected to your Wi-Fi network.
 
@@ -28,9 +28,9 @@ rm-ai devices
 ```
 Output:
 ```text
-📱 Configured reMarkable Tablets:
-  🟢 ACTIVE rm2        - reMarkable 2 (Primary) (Host: rm2)
-  ⚪        rm-alt     - reMarkable 2 (Secondary) (Host: rm-alt)
+Configured reMarkable Tablets:
+  [ACTIVE] rm2        - reMarkable 2 (Primary) (Host: rm2)
+           rm-alt     - reMarkable 2 (Secondary) (Host: rm-alt)
 ```
 
 ### 2. Switch Active Tablet
@@ -54,7 +54,7 @@ rm-ai --device rm-alt read "Research"
 
 ---
 
-## 🔧 Setting Up a New reMarkable Tablet (Wi-Fi SSH)
+## Setting Up a New reMarkable Tablet (Wi-Fi SSH)
 
 To add any reMarkable tablet (reMarkable 1, 2, or Paper Pro) to `remarkable-ai`:
 
@@ -84,7 +84,7 @@ To add any reMarkable tablet (reMarkable 1, 2, or Paper Pro) to `remarkable-ai`:
 
 ---
 
-## 💻 CLI Commands
+## CLI Commands
 
 ```bash
 # List all notebooks on your reMarkable wirelessly
@@ -105,7 +105,7 @@ rm-ai --device rm-alt read
 
 ---
 
-## ⚡ Slash Commands for Claude Code
+## Slash Commands for Claude Code
 
 This repository includes pre-built Claude Code commands in `.claude/commands/`:
 
@@ -117,16 +117,16 @@ This repository includes pre-built Claude Code commands in `.claude/commands/`:
 
 ---
 
-## 🧠 Antigravity / Gemini Skill
+## Antigravity / Gemini Skill
 
 Defined in [`skills/remarkable-ai/SKILL.md`](skills/remarkable-ai/SKILL.md). When Antigravity or a Gemini Agent is active, it can autonomously interact with your tablet, discover notes, and summarize handwriting on demand.
 
 ---
 
-## 📋 Full Command Specification & Architecture
+## Full Command Specification & Architecture
 For the complete catalog of commands (Obsidian sync, live presentation sharing, daily briefing generator, and second monitor setup), see [COMMANDS.md](COMMANDS.md) and [PLAN.md](PLAN.md).
 
 ---
 
-## 📄 License
+## License
 MIT © [khoshkhah](https://github.com/khoshkhah)
