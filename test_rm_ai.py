@@ -27,7 +27,7 @@ def test_stroke_is_resampled_hovered_and_lifted():
     assert evs[-2] == (rm_ai.EV_KEY, rm_ai.BTN_TOOL_PEN, 0)
 
 
-def test_erasing_a_segment_covers_it_and_never_touches_its_neighbours():
+def test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours():
     ERASER_R = rm_ai.SevenSegmentDigit.ERASER_R
 
     def footprint(path, r):  # bounding box of the path swept by a disc of radius r
@@ -37,36 +37,44 @@ def test_erasing_a_segment_covers_it_and_never_touches_its_neighbours():
     def disjoint(a, b):
         return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
 
+    def across(path, seg):  # perpendicular offsets of the passes of a bar
+        return sorted({p[1] if seg in "ADG" else p[0] for p in path})
+
     built = 0
     for w, h in [(50, 90), (75, 140), (95, 175), (120, 220)]:
-        for pen_width in (6, 12, 18, 24, 32):
+        for thickness, pen in [(12, 12), (18, 12), (24, 12), (24, 18), (32, 13), (12, 8)]:
             try:
-                d = rm_ai.SevenSegmentDigit(None, 100, 100, w, h, pen_width=pen_width)
+                d = rm_ai.SevenSegmentDigit(None, 100, 100, w, h, thickness=thickness, pen=pen)
             except ValueError:
                 continue
             built += 1
-            pen_r = pen_width / 2
+            want = max(thickness, pen)
             for seg, erase in d.erase_coords.items():
+                draw = d.draw_coords[seg]
+                ink = footprint(draw, pen / 2)
+                # the passes together are exactly as thick as asked, and overlap each other
+                assert abs((ink[3] - ink[1] if seg in "ADG" else ink[2] - ink[0]) - want) < 1e-6, (w, h, thickness, pen, seg)
+                a = across(draw, seg)
+                assert all(b_ - a_ <= pen / 2 + 1e-6 for a_, b_ in zip(a, a[1:])), (thickness, pen, seg)
+                # the eraser covers all of it, its passes overlap, and it never reaches another bar's ink
                 e = footprint(erase, ERASER_R)
-                own = footprint(d.draw_coords[seg], pen_r)
-                assert e[0] <= own[0] and e[1] <= own[1] and e[2] >= own[2] and e[3] >= own[3], (w, h, pen_width, seg)
-                # the eraser passes must overlap each other, or a strip of ink survives between them
-                across = sorted({p[1] if seg in "ADG" else p[0] for p in erase})
-                assert all(b - a <= 2 * ERASER_R for a, b in zip(across, across[1:])), (w, h, pen_width, seg)
-                for other, draw in d.draw_coords.items():
+                assert e[0] <= ink[0] and e[1] <= ink[1] and e[2] >= ink[2] and e[3] >= ink[3], (w, h, thickness, pen, seg)
+                a = across(erase, seg)
+                assert all(b_ - a_ <= 2 * ERASER_R for a_, b_ in zip(a, a[1:])), (thickness, pen, seg)
+                for other, odraw in d.draw_coords.items():
                     if other != seg:
-                        assert disjoint(e, footprint(draw, pen_r)), (w, h, pen_width, seg, other)
-    assert built >= 12
-    d = rm_ai.SevenSegmentDigit(None, 0, 0, 95, 175, pen_width=12)   # the geometry verified on a tablet
-    assert d.gap == 18 and len(d.erase_coords["A"]) == 4
+                        assert disjoint(e, footprint(odraw, pen / 2)), (w, h, thickness, pen, seg, other)
+    assert built >= 14
+    d = rm_ai.SevenSegmentDigit(None, 0, 0, 95, 175, thickness=12, pen=12)   # the geometry verified on a tablet
+    assert d.gap == 18 and d.draw_offsets == [0] and len(d.erase_coords["A"]) == 4
     try:
-        rm_ai.SevenSegmentDigit(None, 0, 0, 75, 140, pen_width=40)
-        assert False, "a 40px pen cannot fit a medium digit"
+        rm_ai.SevenSegmentDigit(None, 0, 0, 75, 140, thickness=40, pen=12)
+        assert False, "40px bars cannot fit a medium digit"
     except ValueError:
         pass
 
 
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
-    test_erasing_a_segment_covers_it_and_never_touches_its_neighbours()
+    test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours()
     print("ok")

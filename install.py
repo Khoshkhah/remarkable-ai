@@ -21,8 +21,16 @@ def main():
 
     repo_dir = Path(__file__).resolve().parent
 
-    # 2. Install package
+    # 2. Install package. Editable installs need setuptools >= 64 to read pyproject.toml; with an
+    #    older one pip silently installs an "UNKNOWN 0.0.0" package with no dependencies.
     print("📦 Step 1: Installing Python package and dependencies...")
+    for flags in ([], ["--break-system-packages"], ["--user"]):
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip", "setuptools>=64"] + flags,
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+        except subprocess.CalledProcessError:
+            continue
     install_cmds = [
         [sys.executable, "-m", "pip", "install", "-e", str(repo_dir)],
         [sys.executable, "-m", "pip", "install", str(repo_dir)],

@@ -94,10 +94,13 @@ stretches it ~15% and makes eraser strokes come out as pen lines — that was th
 
 `DigitalClock` sits on top: each digit is 7 segments, and every tick only toggles segments whose
 state changed — pen to draw, eraser to remove — which is what keeps e-ink churn near zero.
-`SevenSegmentDigit` derives its corner gap and erase sweep from `--pen-width` (default 12, the
-ballpoint) against the fixed ~17px medium eraser, so erasing one segment never nicks a neighbour
-(`test_rm_ai.py` asserts this); too wide a pen for the digit size raises `ValueError`. The tick
-loop sleeps to the next wall-clock second, so drawing time cannot drift or skip seconds.
+`SevenSegmentDigit` builds bars of `--thickness` px from overlapping passes of the pen in use and
+derives its corner gap and erase sweep from that ink width against the fixed ~17px medium eraser,
+so erasing one segment never nicks a neighbour (`test_rm_ai.py` asserts this); bars too thick for
+the digit size raise `ValueError`. The width of one pen line at the chosen `--pressure` is
+measured by `detect_pen_width()` from the newest page's saved strokes (every stroke records pen,
+pressure and drawn width), with `--pen-width` as the manual override. The tick loop sleeps to the
+next wall-clock second, so drawing time cannot drift or skip seconds.
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
 image locally and scp's it to `/usr/share/remarkable/suspended.png`, backing the factory image up
