@@ -273,6 +273,193 @@ def cmd_read(args):
     if not args.save:
         print("[Auto-cleanup] Temporary render files cleanly deleted from disk.")
 
+def ensure_remote_folder(folder_path, host=None):
+    """Ensure a nested folder hierarchy exists on the reMarkable tablet, creating missing folders."""
+    if not folder_path or folder_path.strip() in ("", "/"):
+        return ""
+    
+    import uuid
+    import time
+    
+    parts = [p.strip() for p in folder_path.strip("/").split("/") if p.strip()]
+    if not parts:
+        return ""
+    
+    raw = run_ssh(f'for f in {REMOTE_PATH}/*.metadata; do [ -f "$f" ] || continue; uuid=$(basename "$f" .metadata); cat "$f"; echo "---$uuid---"; done', host=host)
+    folders = {}
+    chunks = raw.split("---")
+    for i in range(0, len(chunks) - 1, 2):
+        meta_str = chunks[i].strip()
+        f_uuid = chunks[i+1].strip()
+        if not meta_str or not f_uuid:
+            continue
+        try:
+            d = json.loads(meta_str)
+            if not d.get("deleted", False) and d.get("type") == "CollectionType":
+                folders[f_uuid] = {
+                    "name": d.get("visibleName", ""),
+                    "parent": d.get("parent", "")
+                }
+        except Exception:
+            pass
+
+    current_parent = ""
+    for part in parts:
+        found_uuid = None
+        for f_uuid, f_info in folders.items():
+            if f_info["name"].lower() == part.lower() and f_info["parent"] == current_parent:
+                found_uuid = f_uuid
+                break
+        
+        if found_uuid:
+            current_parent = found_uuid
+        else:
+            new_f_uuid = str(uuid.uuid4())
+            ts = str(int(time.time() * 1000))
+            meta = {
+                "deleted": False,
+                "lastModified": ts,
+                "metadatamodified": False,
+                "modified": False,
+                "parent": current_parent,
+                "pinned": False,
+                "synced": False,
+                "type": "CollectionType",
+                "version": 1,
+                "visibleName": part
+            }
+            content = {}
+            with tempfile.TemporaryDirectory() as tmp:
+                m_path = os.path.join(tmp, f"{new_f_uuid}.metadata")
+                c_path = os.path.join(tmp, f"{new_f_uuid}.content")
+                with open(m_path, "w") as f:
+                    json.dump(meta, f, indent=2)
+                with open(c_path, "w") as f:
+                    json.dump(content, f, indent=2)
+                
+                target = host or get_active_host()
+                subprocess.run(["scp", "-q", m_path, c_path, f"{target}:{REMOTE_PATH}/"], check=True)
+            
+            folders[new_f_uuid] = {"name": part, "parent": current_parent}
+            current_parent = new_f_uuid
+            print(f"📁 Created folder '{part}' on reMarkable (UUID: {new_f_uuid})")
+
+    return current_parent
+
+def cmd_push(args):
+    """Upload a PDF, Markdown, or text file wirelessly to reMarkable tablet, creating folders if needed."""
+    file_path = Path(args.file).resolve()
+    if not file_path.exists():
+        print(f"❌ File not found: {file_path}")
+        return
+
+    import uuid
+    import time
+    from pypdf import PdfReader
+
+    target_host = get_active_host(getattr(args, "device", None))
+
+    folder_name = getattr(args, "folder", None)
+    parent_uuid = ""
+    if folder_name:
+        print(f"📁 Checking folder structure '{folder_name}' on reMarkable...")
+        parent_uuid = ensure_remote_folder(folder_name, host=target_host)
+
+    ext = file_path.suffix.lower()
+    title = args.title or file_path.stem
+    pdf_to_upload = file_path
+    temp_dir = None
+
+    if ext in [".md", ".markdown", ".txt"]:
+        print(f"📄 Converting {ext.upper()} document to e-ink formatted PDF...")
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        temp_dir = tempfile.TemporaryDirectory()
+        converted_pdf = Path(temp_dir.name) / f"{title}.pdf"
+
+        doc = SimpleDocTemplate(str(converted_pdf), pagesize=A4, rightMargin=54, leftMargin=54, topMargin=54, bottomMargin=54)
+        styles = getSampleStyleSheet()
+        normal = styles["Normal"]
+        normal.fontSize = 11
+        normal.leading = 15
+
+        story = [Paragraph(title, styles["Heading1"]), Spacer(1, 15)]
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_str = line.rstrip()
+                if not line_str:
+                    story.append(Spacer(1, 8))
+                elif line_str.startswith("# "):
+                    story.append(Paragraph(line_str[2:], styles["Heading1"]))
+                elif line_str.startswith("## "):
+                    story.append(Paragraph(line_str[3:], styles["Heading2"]))
+                elif line_str.startswith("### "):
+                    story.append(Paragraph(line_str[4:], styles["Heading3"]))
+                elif line_str.startswith("```"):
+                    continue
+                else:
+                    safe_text = line_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    story.append(Paragraph(safe_text, normal))
+
+        doc.build(story)
+        pdf_to_upload = converted_pdf
+
+    reader = PdfReader(str(pdf_to_upload))
+    page_count = len(reader.pages)
+
+    doc_uuid = str(uuid.uuid4())
+    ts = str(int(time.time() * 1000))
+    metadata = {
+        "deleted": False,
+        "lastModified": ts,
+        "metadatamodified": False,
+        "modified": False,
+        "parent": parent_uuid,
+        "pinned": False,
+        "synced": False,
+        "type": "DocumentType",
+        "version": 1,
+        "visibleName": title
+    }
+    content = {
+        "extraMetadata": {},
+        "fileType": "pdf",
+        "formatVersion": 2,
+        "lineHeight": -1,
+        "margins": 125,
+        "orientation": "portrait",
+        "pageCount": page_count,
+        "textScale": 1,
+        "zoomMode": "bestFit"
+    }
+
+    print(f"📡 Uploading '{title}' ({page_count} pages) to reMarkable...")
+    with tempfile.TemporaryDirectory() as upload_tmp:
+        m_file = os.path.join(upload_tmp, f"{doc_uuid}.metadata")
+        c_file = os.path.join(upload_tmp, f"{doc_uuid}.content")
+        p_file = os.path.join(upload_tmp, f"{doc_uuid}.pagedata")
+        
+        with open(m_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+        with open(c_file, "w") as f:
+            json.dump(content, f, indent=2)
+        with open(p_file, "w") as f:
+            f.write("")
+
+        run_ssh(f"mkdir -p {REMOTE_PATH}/{doc_uuid}", host=target_host)
+        subprocess.run(["scp", "-q", str(pdf_to_upload), f"{target_host}:{REMOTE_PATH}/{doc_uuid}.pdf"], check=True)
+        subprocess.run(["scp", "-q", m_file, c_file, p_file, f"{target_host}:{REMOTE_PATH}/"], check=True)
+
+    if temp_dir:
+        temp_dir.cleanup()
+
+    print("🔄 Refreshing tablet library...")
+    run_ssh("systemctl restart xochitl", host=target_host)
+    folder_msg = f" in folder '{folder_name}'" if folder_name else ""
+    print(f"✅ Successfully uploaded '{title}' to reMarkable{folder_msg}!")
+
 
 def analyze_with_ai(image_path, action="summarize", prompt=None):
     from google import genai
@@ -474,6 +661,13 @@ def main():
     p_read.add_argument("--prompt", type=str, default=None, help="Custom prompt for the AI")
     p_read.add_argument("--save", type=str, default=None, help="Save rendered PNG to path")
     p_read.set_defaults(func=cmd_read)
+
+    # push
+    p_push = subparsers.add_parser("push", help="Upload PDF or Markdown document to tablet")
+    p_push.add_argument("file", type=str, help="Path to PDF or Markdown file to upload")
+    p_push.add_argument("--folder", "-f", type=str, default=None, help="Target folder path on tablet (creates if missing)")
+    p_push.add_argument("--title", "-t", type=str, default=None, help="Custom display title on tablet")
+    p_push.set_defaults(func=cmd_push)
 
     args = parser.parse_args()
     if not args.command:

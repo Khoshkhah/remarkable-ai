@@ -141,6 +141,10 @@ rm-ai read "Meeting Notes" --action tasks
 # Read a specific page
 rm-ai read "D-Wave" --page 5 --action transcribe
 
+# Push a PDF or Markdown document wirelessly (creates folder if missing)
+rm-ai push report.pdf --folder "Work/Reports"
+rm-ai push notes.md --folder "AI-Summaries" --title "Morning Brief"
+
 # Target specific tablet
 rm-ai --device rm-alt read
 ```
