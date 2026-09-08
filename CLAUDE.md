@@ -145,8 +145,10 @@ weather block as Helvetica text in the sleep screen's layout, `weather_block()`)
 open (`home_screen()`), on a new day or when the printed weather is over 6 h old; the first push is the
 PC's full page. The pen strokes live in the `.rm` and survive the swap; the PC's standby cron tops the
 template stock up (`top_up_dash_pages`, no reload). `TABLET_DASH_LAYOUT` is the single source of the
-pen-owned zones (clock and the three usage rows, erased whole when a value in them changes), text
-origins and bars, written to the tablet as `layout`; rmdash draws only zones whose sweep file exists.
+pen-owned zones (clock and the three usage rows: bar and percentage; the rows' reset times are printed
+by `usage_block()` in the composed page, `RESET_TEXT` in Python for the first push, and a change of
+them triggers a recompose like a new day does), text origins and bars, written to the tablet as
+`layout`; rmdash draws only zones whose sweep file exists.
 Glyphs are single strokes: `STROKE_FONT` is a designed plotter-style font (lines and arcs on a 100-unit
 em, cap height 72, y down; `_arc()` angles are clockwise on screen, 90 = bottom) that `stroke_glyph()`
 centres in the page font's advance width, so a thick pen (the Marker) draws a bold digit in a second;
