@@ -1631,11 +1631,11 @@ GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmda
 # (font size, x, y) of a text origin.
 TABLET_DASH_LAYOUT = {
     "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565)},
-    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (56, 335, 1050), "pct1": (110, 105, 1235), "reset1": (56, 335, 1240),
-              "pct2": (110, 105, 1425), "reset2": (56, 335, 1430)},
+    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (48, 335, 1054), "pct1": (110, 105, 1235), "reset1": (48, 335, 1244),
+              "pct2": (110, 105, 1425), "reset2": (48, 335, 1434)},
     "bars": [(LIVE_BAR_X[0], LIVE_BAR_X[1], y + 13) for y in LIVE_USAGE_ROWS],
 }
-GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 56: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:"}
+GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 48: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:"}
 DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to compose and swap in by itself
 
 

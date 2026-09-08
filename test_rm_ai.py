@@ -151,7 +151,7 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])
         assert {"bar0.bin", "bar1.bin", "bar2.bin", "layout", "glyphs"} <= names
         glyphs = {(int(a), int(b)): float(c) for a, b, c in (l.split() for l in (out / "glyphs").read_text().splitlines())}
-        assert glyphs[(56, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(56, ord("0"))]
+        assert glyphs[(48, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(48, ord("0"))]
         layout = (out / "layout").read_text()
         assert f"base {rm_ai.GLYPH_BASE[0]} {rm_ai.GLYPH_BASE[1]}" in layout and "text clock 190 80 115" in layout and "bar 0 278 521 1013" in layout
         # single-line glyphs: a digit is one to three strokes, its first pen-down near the glyph base
