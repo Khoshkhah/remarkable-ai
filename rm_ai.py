@@ -59,11 +59,12 @@ def run_ssh(cmd, host=None):
     return res.stdout
 
 
-def list_notebooks():
-    """Fetch all notebooks from reMarkable metadata."""
+def list_notebooks(host=None):
+    """Fetch all notebooks and folder hierarchy from reMarkable metadata."""
     print("📡 Connecting to reMarkable wirelessly...")
-    raw = run_ssh(f"for f in {REMOTE_PATH}/*.metadata; do [ -f \"$f\" ] || continue; uuid=$(basename \"$f\" .metadata); cat \"$f\"; echo \"---$uuid---\"; done")
-    notebooks = []
+    raw = run_ssh(f"for f in {REMOTE_PATH}/*.metadata; do [ -f \"$f\" ] || continue; uuid=$(basename \"$f\" .metadata); cat \"$f\"; echo \"---$uuid---\"; done", host=host)
+    folders = {}
+    docs = []
     
     chunks = raw.split("---")
     for i in range(0, len(chunks) - 1, 2):
@@ -73,78 +74,161 @@ def list_notebooks():
             continue
         try:
             data = json.loads(meta_str)
-            if data.get("type") == "DocumentType" and not data.get("deleted", False):
-                notebooks.append({
+            if data.get("deleted", False):
+                continue
+            item_type = data.get("type", "")
+            if item_type == "CollectionType":
+                folders[uuid] = {
+                    "name": data.get("visibleName", "Untitled"),
+                    "parent": data.get("parent", "")
+                }
+            elif item_type == "DocumentType":
+                docs.append({
                     "uuid": uuid,
                     "title": data.get("visibleName", "Untitled"),
+                    "parent": data.get("parent", ""),
                     "lastModified": int(data.get("lastModified", 0)),
                     "lastOpenedPage": data.get("lastOpenedPage", 0)
                 })
         except Exception:
             continue
+
+    def get_full_path(folder_uuid):
+        path_parts = []
+        curr = folder_uuid
+        visited = set()
+        while curr and curr in folders and curr not in visited:
+            visited.add(curr)
+            path_parts.insert(0, folders[curr]["name"])
+            curr = folders[curr].get("parent", "")
+        return "/".join(path_parts) if path_parts else ""
+
+    notebooks = []
+    for d in docs:
+        folder_path = get_full_path(d["parent"])
+        full_path = f"{folder_path}/{d['title']}" if folder_path else d["title"]
+        notebooks.append({
+            "uuid": d["uuid"],
+            "title": d["title"],
+            "folder": folder_path or "/",
+            "full_path": full_path,
+            "lastModified": d["lastModified"],
+            "lastOpenedPage": d["lastOpenedPage"]
+        })
             
     notebooks.sort(key=lambda x: x["lastModified"], reverse=True)
     return notebooks
 
 def render_rm_to_png(rm_path, output_png):
-    """Parse .rm v6 vector strokes and render to PNG."""
-    from rmscene import read_blocks, SceneLineItemBlock
+    """Parse .rm v5 or v6 vector strokes and render to PNG."""
+    import struct
     import svgwrite
     import cairosvg
 
     with open(rm_path, 'rb') as f:
-        blocks = list(read_blocks(f))
+        header = f.read(43)
+        if header.startswith(b"reMarkable .lines file, version=5"):
+            # Version 5 binary parser
+            num_layers = struct.unpack('<I', f.read(4))[0]
+            lines = []
+            for _ in range(num_layers):
+                num_lines = struct.unpack('<I', f.read(4))[0]
+                for _ in range(num_lines):
+                    brush_type, color, unk, brush_size, unk2, num_points = struct.unpack('<IIIfII', f.read(24))
+                    pts = []
+                    for _ in range(num_points):
+                        x, y, speed, direction, width, pressure = struct.unpack('<ffffff', f.read(24))
+                        pts.append((x, y))
+                    if len(pts) > 1:
+                        lines.append(pts)
 
-    line_blocks = [b for b in blocks if isinstance(b, SceneLineItemBlock)]
-    if not line_blocks:
-        return False
+            if not lines:
+                return False
 
-    dwg = svgwrite.Drawing(size=('1404px', '1872px'), profile='tiny')
-    dwg.add(dwg.rect(insert=(0, 0), size=('100%', '100%'), fill='white'))
+            dwg = svgwrite.Drawing(size=('1404px', '1872px'), profile='tiny')
+            dwg.add(dwg.rect(insert=(0, 0), size=('100%', '100%'), fill='white'))
+            for pts in lines:
+                dwg.add(dwg.polyline(pts, stroke='black', stroke_width=2.5, fill='none', stroke_linecap='round', stroke_linejoin='round'))
 
-    all_x, all_y = [], []
-    for lb in line_blocks:
-        for p in lb.item.value.points:
-            all_x.append(p.x)
-            all_y.append(p.y)
+            svg_str = dwg.tostring()
+            cairosvg.svg2png(bytestring=svg_str.encode('utf-8'), write_to=output_png)
+            return True
 
-    min_x = min(all_x) if all_x else 0
-    offset_x = 702 if min_x < 0 else 0
-    offset_y = 0
+        elif header.startswith(b"reMarkable .lines file, version=6"):
+            f.seek(0)
+            from rmscene import read_blocks, SceneLineItemBlock
+            blocks = list(read_blocks(f))
+            line_blocks = [b for b in blocks if isinstance(b, SceneLineItemBlock)]
+            if not line_blocks:
+                return False
 
-    for lb in line_blocks:
-        pts = [(p.x + offset_x, p.y + offset_y) for p in lb.item.value.points]
-        if len(pts) > 1:
-            dwg.add(dwg.polyline(pts, stroke='black', stroke_width=2.5, fill='none', stroke_linecap='round', stroke_linejoin='round'))
+            dwg = svgwrite.Drawing(size=('1404px', '1872px'), profile='tiny')
+            dwg.add(dwg.rect(insert=(0, 0), size=('100%', '100%'), fill='white'))
 
-    svg_str = dwg.tostring()
-    cairosvg.svg2png(bytestring=svg_str.encode('utf-8'), write_to=output_png)
-    return True
+            all_x, all_y = [], []
+            for lb in line_blocks:
+                for p in lb.item.value.points:
+                    all_x.append(p.x)
+                    all_y.append(p.y)
+
+            min_x = min(all_x) if all_x else 0
+            offset_x = 702 if min_x < 0 else 0
+            offset_y = 0
+
+            for lb in line_blocks:
+                pts = [(p.x + offset_x, p.y + offset_y) for p in lb.item.value.points]
+                if len(pts) > 1:
+                    dwg.add(dwg.polyline(pts, stroke='black', stroke_width=2.5, fill='none', stroke_linecap='round', stroke_linejoin='round'))
+
+            svg_str = dwg.tostring()
+            cairosvg.svg2png(bytestring=svg_str.encode('utf-8'), write_to=output_png)
+            return True
+        else:
+            print(f"Unknown lines format: {header[:30]}")
+            return False
+
 
 def cmd_list(args):
-    notebooks = list_notebooks()
-    print(f"\n📚 Found {len(notebooks)} notebooks on reMarkable:\n")
-    print(f"{'TITLE':<30} {'UUID':<38}")
-    print("-" * 70)
+    target_host = get_active_host(getattr(args, "device", None))
+    notebooks = list_notebooks(target_host)
+    folder_filter = getattr(args, "folder", None)
+    if folder_filter:
+        q = folder_filter.strip().lower()
+        notebooks = [nb for nb in notebooks if q in nb["folder"].lower()]
+        print(f"\n📚 Found {len(notebooks)} notebooks in folder '{folder_filter}':\n")
+    else:
+        print(f"\n📚 Found {len(notebooks)} notebooks on reMarkable:\n")
+
+    print(f"{'FOLDER':<16} {'TITLE':<34} {'UUID':<38}")
+    print("-" * 92)
     for nb in notebooks:
-        print(f"{nb['title']:<30} {nb['uuid']:<38}")
+        print(f"{nb['folder']:<16} {nb['title']:<34} {nb['uuid']:<38}")
     print()
 
 def cmd_read(args):
-    notebooks = list_notebooks()
+    target_host = get_active_host(getattr(args, "device", None))
+    notebooks = list_notebooks(target_host)
     target = None
     if args.name:
+        q = args.name.strip().lower()
+        # 1. Exact match on full_path or title
         for nb in notebooks:
-            if args.name.lower() in nb["title"].lower():
+            if q == nb["full_path"].lower() or q == nb["title"].lower():
                 target = nb
                 break
+        # 2. Substring match
+        if not target:
+            for nb in notebooks:
+                if q in nb["full_path"].lower() or q in nb["title"].lower():
+                    target = nb
+                    break
         if not target:
             print(f"❌ Notebook matching '{args.name}' not found.")
             return
     else:
         target = notebooks[0]
 
-    print(f"📖 Reading notebook: '{target['title']}' (UUID: {target['uuid']})")
+    print(f"📖 Reading notebook: '{target['full_path']}' (UUID: {target['uuid']})")
     
     # Get pages from .content
     content_raw = run_ssh(f"cat {REMOTE_PATH}/{target['uuid']}.content")
@@ -379,6 +463,7 @@ def main():
 
     # list
     p_list = subparsers.add_parser("list", help="List all notebooks on reMarkable")
+    p_list.add_argument("folder", nargs="?", default=None, help="Optional folder name to filter by")
     p_list.set_defaults(func=cmd_list)
 
     # read
