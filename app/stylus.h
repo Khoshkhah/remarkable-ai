@@ -298,20 +298,23 @@ static int give_back_the_pen(const char *doc) {
     return 1;
 }
 
-struct ink { const char *rm; long seen, awake_s, biggest, size_at_draw; int drew; long long last; };
+struct ink { const char *rm; long seen, awake_s, biggest, size_before, mtime_at_draw; int drew; long long last; };
 static long fsize(const char *path) { struct stat st; return stat(path, &st) ? 0 : (long)st.st_size; }
 static void ink_reset(struct ink *w, const char *rm) { w->rm = rm; w->seen = mtime(rm); w->awake_s = 0; w->last = now_us(); w->biggest = fsize(rm); w->drew = 0; }
-static void ink_drawn(struct ink *w) { w->drew = 1; w->size_at_draw = fsize(w->rm); }   /* call after a cycle that drew */
-/* strokes were drawn, the page has been saved since, and it did not grow: the pen is not inking (the
- * eraser is the selected tool). Returns 1 once per drawing cycle that left nothing behind. */
+static void ink_begin(struct ink *w) { w->size_before = fsize(w->rm); }          /* before a cycle erases and draws */
+static void ink_drawn(struct ink *w) { w->drew = 1; w->mtime_at_draw = mtime(w->rm); }   /* after a cycle that drew */
+/* the last cycle drew, the page has been saved since, and the file did not keep its size: the strokes
+ * left no ink, so the eraser is the selected tool (pen strokes erase then). A cycle replaces content,
+ * so a working pen keeps the size; a dead pen only takes the old content away. Once per cycle. */
 static int ink_none(struct ink *w) {
-    if (!w->drew || mtime(w->rm) == w->seen) return 0;
+    if (!w->drew || mtime(w->rm) == w->mtime_at_draw) return 0;
     w->drew = 0;
-    if (fsize(w->rm) > w->size_at_draw) return 0;
-    fprintf(stderr, "the strokes left no ink: is the eraser selected on this page? (retrying every minute)\n");
+    long sz = fsize(w->rm);
+    int none = w->size_before < 2000 ? sz < w->size_before + 300 : sz < w->size_before * 0.85;
+    if (!none) return 0;
+    fprintf(stderr, "the strokes left no ink (%ld -> %ld bytes): is the eraser selected on this page? (retrying)\n", w->size_before, sz);
     return 1;
 }
-/* the page was wiped (Erase all, or the file removed): its file shrank to a fraction of what our strokes filled */
 static int ink_wiped(struct ink *w) {
     long sz = fsize(w->rm);
     if (sz > w->biggest) w->biggest = sz;

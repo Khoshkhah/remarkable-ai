@@ -471,6 +471,8 @@ int main(int argc, char **argv) {
             ink_reset(&ink, rmfile);
             if (page_lost) continue;
         }
+        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) { for (int z = 0; z < NZ; z++) shown[z][0] = 0; unlink(state_path); }
+        ink_begin(&ink);
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
         int changed[NZ], any = 0; char name[32];
@@ -488,7 +490,6 @@ int main(int argc, char **argv) {
         }
         if (page_lost) continue;
         if (any) ink_drawn(&ink);
-        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) { for (int z = 0; z < NZ; z++) shown[z][0] = 0; unlink(state_path); }
         if (time(NULL) - fetched >= minutes * 60) {        /* network only after drawing; what changed is drawn next round */
             long long t0 = now_us();
             if (zone_on[7]) fetch_weather();

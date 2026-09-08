@@ -54,6 +54,8 @@ int main(int argc, char **argv) {
             ink_reset(&ink, rmfile);
             if (page_lost) { page_lost = 0; lost = 1; continue; }
         }
+        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) shown[0] = 0;   /* everything drawn again below */
+        ink_begin(&ink);
         /* the time at the last interval boundary, e.g. :00 :02 :04 */
         time_t t = (time_t)((time(NULL) / interval) * interval);
         struct tm lt; localtime_r(&t, &lt);
@@ -82,7 +84,6 @@ int main(int argc, char **argv) {
             ink_drawn(&ink);
         }
         if (page_lost) { page_lost = 0; lost = 1; continue; }
-        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) { shown[0] = 0; continue; }   /* everything drawn again below */
         long long us = interval * 1000000LL - now_us() % (interval * 1000000LL);
         nap(us);
     }
