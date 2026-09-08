@@ -28,11 +28,12 @@ int main(int argc, char **argv) {
     if (interval < 1) interval = 1;
     use_pc_timezone();
     setvbuf(stderr, NULL, _IOLBF, 0);
+    journal_start(doc);
     char shown[8] = "", name[32];
     int active = 0, lost = 0;
     struct ink ink = {0};
     while (1) {
-        int is_open = doc_open(doc);
+        int is_open = page_on_screen();
         if (!is_open) lost = 0;                  /* a fresh open of the document is a fresh start */
         if (!is_open || lost) {
             if (active) { fprintf(stderr, "clock document closed, stopping\n"); close_device(); active = 0; }
@@ -50,6 +51,7 @@ int main(int argc, char **argv) {
             shown[0] = 0;
             active = 1;
             ink_reset(&ink, rmfile);
+            if (page_lost) { page_lost = 0; lost = 1; continue; }
         }
         /* the time at the last interval boundary, e.g. :00 :02 :04 */
         time_t t = (time_t)((time(NULL) / interval) * interval);
@@ -68,9 +70,11 @@ int main(int argc, char **argv) {
                 const char *new = DIGIT_SEGS[want[s] - '0'];
                 for (const char *p = new; *p; p++) if (!strchr(old, *p)) { snprintf(name, sizeof name, "d%d%c.bin", s, *p); stroke_file(name, 0, 0, 0, -1); }
             }
+            if (page_lost) { page_lost = 0; lost = 1; continue; }   /* redrawn from scratch when the page is back */
             if (!shown[0]) fprintf(stderr, "showing %s\n", want);
             strcpy(shown, want);
         }
+        if (page_lost) { page_lost = 0; lost = 1; continue; }
         if (ink_lost(&ink)) { lost = 1; continue; }
         long long us = interval * 1000000LL - now_us() % (interval * 1000000LL);
         nap(us);

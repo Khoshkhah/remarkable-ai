@@ -123,9 +123,16 @@ moved there by editing its `.metadata` parent); `bake_clock_app()` records every
 (the tablet runs on UTC) and the static ARMv7 binary `app/rmclock` to `/home/root/.local/share/rmclock`
 with a systemd unit `rmclock.service`. `app/rmclock.c` replays the blobs with the same pacing constants
 (keep them in sync with `VirtualStylus` by hand), yields to the real pen by reading the digitizer
-back and filtering its own echo, draws only while `LastOpen` in `xochitl.conf` names the clock
-document (xochitl clears it to `@ByteArray()` on the home screen) and stops if the page's `.rm` has
-not been autosaved for 3 awake minutes (strokes not landing = page not on screen). Rebuild with
+back and filtering its own echo, and stops if the page's `.rm` has not been autosaved for 3 awake
+minutes (strokes not landing = page not on screen). **Before every stroke** `page_on_screen()` in
+`stylus.h` requires two things: `LastOpen` in `xochitl.conf` names the document (xochitl clears it
+to `@ByteArray()` on the home screen) *and* xochitl's journal says the document's worker is running
+(`worker on <uuid> now running` / `now exiting`, tailed with `journalctl -u xochitl -f`; a
+"translation" line marks a restart). `LastOpen` alone is not enough: for about a minute after
+`systemctl restart xochitl` it still names the document while the home screen shows, and strokes
+sent then tapped a library tile and drew on the user's notes. When the page leaves mid-draw the
+program stops at once (`page_lost`) and redraws everything on the next open. Installers stop the
+services before any push, and `dashboard --install --no-push` reuses the page without a restart. Rebuild with
 `app/build.sh` (Docker, `alpine` arm/v7 image, musl static); the binary is committed. It takes
 `rmclock <dir> [xochitl.conf] [event device]` so a dry run on the PC against a plain file works.
 

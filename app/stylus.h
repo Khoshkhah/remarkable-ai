@@ -45,6 +45,8 @@ static char dir[512];
 static int fd = -1;
 static long long real_until = 0;
 static int last_tool = 0;   /* 0 none, 1 pen, 2 eraser */
+static int page_lost;               /* set when the page left the screen mid-draw (see page_on_screen) */
+static int page_on_screen(void);
 
 /* echo filter: (type, code, value) of events we injected recently come back through the reader */
 #define RING 4096
@@ -145,6 +147,10 @@ static void play_blob(const unsigned char *blob, size_t len, int eraser, int32_t
     int tool_code = eraser ? BTN_TOOL_RUBBER : BTN_TOOL_PEN;
     for (size_t i = 0; i < n; i++) {
         if (!(ev[i].type == EV_KEY && ev[i].code == tool_code && ev[i].value == 0)) continue;
+        if (page_lost || !page_on_screen()) {                 /* never a single stroke on another page */
+            if (!page_lost) fprintf(stderr, "the page left the screen, stopping mid-draw\n");
+            page_lost = 1; return;
+        }
         size_t end = i + 1;                                   /* the stroke ends with the tool leaving proximity ... */
         while (end < n && ev[end].type != EV_SYN) end++;      /* ... and that frame's SYN */
         if (end < n) end++;
@@ -177,6 +183,51 @@ static void hover(long us) {   /* pen in proximity, not touching, for `us` micro
     struct ev out[3] = {E(EV_ABS, ABS_DISTANCE, 60), E(EV_KEY, BTN_TOOL_PEN, 0), E(EV_SYN, 0, 0)};
     write_frame(out, 3);
     last_tool = 1;
+}
+
+/* Is our document really on screen? xochitl's config (LastOpen) names the document to reopen after a
+ * restart while the home screen is showing, so it is not enough: strokes sent then tap the library and
+ * open some other notebook (it happened). The truth is xochitl's own journal: "worker on <uuid> now
+ * running" while a document is open in the editor, "now exiting" when it closes, and a fresh start
+ * (translation line) means nothing is open. Both must agree before every stroke. */
+static const char *watched_doc = NULL;
+static int doc_running = 0, page_lost = 0;
+static int jfd = -1; static FILE *jf = NULL; static char jbuf[4096]; static size_t jlen = 0;
+
+static void journal_line(const char *line) {
+    const char *p = strstr(line, "worker on ");
+    if (p && strstr(p, "now running")) doc_running = strncmp(p + 10, watched_doc, 36) == 0;
+    else if (p && strstr(p, "now exiting")) { if (!strncmp(p + 10, watched_doc, 36)) doc_running = 0; }
+    else if (strstr(line, "Activated translation")) doc_running = 0;   /* xochitl (re)started */
+}
+
+static void journal_start(const char *doc) {
+    watched_doc = doc;
+    FILE *h = popen("journalctl -u xochitl -n 500 -o cat 2>/dev/null", "r");   /* history decides the initial state */
+    if (h) { char line[1024]; while (fgets(line, sizeof line, h)) journal_line(line); pclose(h); }
+    jf = popen("journalctl -u xochitl -f -n 0 -o cat 2>/dev/null", "r");
+    if (jf) { jfd = fileno(jf); fcntl(jfd, F_SETFL, fcntl(jfd, F_GETFL) | O_NONBLOCK); }
+    fprintf(stderr, "xochitl's worker for our document is %s\n", doc_running ? "running" : "not running");
+}
+
+static void journal_poll(void) {
+    ssize_t n;
+    while (jfd >= 0 && (n = read(jfd, jbuf + jlen, sizeof jbuf - 1 - jlen)) > 0) {
+        jlen += (size_t)n; jbuf[jlen] = 0;
+        char *nl;
+        while ((nl = strchr(jbuf, '\n'))) {
+            *nl = 0; journal_line(jbuf);
+            size_t rest = jlen - (size_t)(nl + 1 - jbuf); memmove(jbuf, nl + 1, rest + 1); jlen = rest;
+        }
+        if (jlen >= sizeof jbuf - 1) jlen = 0;   /* an overlong line is dropped */
+    }
+}
+
+static int doc_open(const char *doc);
+static int page_on_screen(void) {
+    journal_poll();
+    if (getenv("RM_FIXTURES")) return doc_open(watched_doc);   /* dry runs off the tablet have no xochitl */
+    return doc_running && doc_open(watched_doc);
 }
 
 static int doc_open(const char *doc) {   /* xochitl keeps the open document's uuid in its config, empty on the home screen */

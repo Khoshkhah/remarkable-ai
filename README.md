@@ -239,7 +239,8 @@ small program that keeps it current whenever the page is open, with no PC: the t
 the date, the month calendar with today ringed, the weather (the tablet asks Open-Meteo itself) and
 the three Claude usage rows. Everything is drawn with the pen in the page's own font, so nothing
 ever reloads; reopening an unchanged page continues where it left off, a page you wrote on is
-cleaned zone by zone first.
+cleaned zone by zone first. Both tablet programs draw only while the tablet's own app reports the
+page open in its editor, checked before every stroke, so nothing is ever drawn on another page.
 
 Claude usage needs a login. A login cannot be shared: renewing it from a second device logs the
 first one out at once (measured). So give the tablet a login of its own, made by Claude Code itself:

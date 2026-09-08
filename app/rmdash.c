@@ -75,7 +75,7 @@ static void draw_at(const char *tname, const char *s, int dy) { struct text *t =
 /* ---------- data: HTTPS through openssl, tiny JSON scanning ---------- */
 
 static int https(const char *host, const char *request, char *out, size_t cap) {
-    const char *fx = getenv("RMDASH_FIXTURES");   /* dry runs off the tablet: canned responses */
+    const char *fx = getenv("RM_FIXTURES");   /* dry runs off the tablet: canned responses */
     if (fx) {
         char p[600]; snprintf(p, sizeof p, "%s/%s", fx, strstr(host, "meteo") ? "weather.json" : strstr(host, "console") ? "token.json" : "usage.json");
         FILE *f = fopen(p, "r"); if (!f) return -1;
@@ -312,19 +312,28 @@ int main(int argc, char **argv) {
     read_layout();
     use_pc_timezone();
     setvbuf(stderr, NULL, _IOLBF, 0);
+    journal_start(doc);
     static char shown[NZ][512], want[NZ][512];
+    char state_path[600]; snprintf(state_path, sizeof state_path, "%s/state", dir);
     int active = 0, lost = 0;
     time_t fetched = 0;
     struct ink ink = {0};
     while (1) {
-        int is_open = doc_open(doc);
+        if (page_lost) {                                    /* stopped mid-draw: forget what is drawn, erase everything next time */
+            page_lost = 0; lost = 1;
+            for (int z = 0; z < NZ; z++) shown[z][0] = 0;
+            unlink(state_path);
+        }
+        int is_open = page_on_screen();
         if (!is_open) lost = 0;
         if (!is_open || lost) {
             if (active) {
                 fprintf(stderr, "dashboard closed, stopping\n");
                 close_device(); active = 0;
-                sleep(3);                                   /* xochitl saves the page on close; remember that version */
-                save_state(shown, mtime(rmfile));
+                if (shown[0][0] || shown[7][0]) {           /* xochitl saves the page on close; remember that version */
+                    sleep(3);
+                    save_state(shown, mtime(rmfile));
+                }
             }
             sleep(2);
             continue;
@@ -343,6 +352,7 @@ int main(int argc, char **argv) {
             } else fprintf(stderr, "page unchanged since last time, keeping what is drawn\n");
             active = 1;
             ink_reset(&ink, rmfile);
+            if (page_lost) continue;
         }
         if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); }
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
@@ -350,10 +360,16 @@ int main(int argc, char **argv) {
         int changed[NZ], any = 0; char name[32];
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
         for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
+        if (page_lost) continue;
         if (any) hover(START_SETTLE_US);
-        for (int z = 0; z < NZ; z++) if (changed[z]) { draw_zone(z, want[z], &lt); strcpy(shown[z], want[z]); fprintf(stderr, "%s: %s\n", ZONES[z], want[z]); }
+        for (int z = 0; z < NZ; z++) if (changed[z]) {
+            draw_zone(z, want[z], &lt);
+            if (page_lost) break;
+            strcpy(shown[z], want[z]); fprintf(stderr, "%s: %s\n", ZONES[z], want[z]);
+        }
+        if (page_lost) continue;
         if (ink_lost(&ink)) { lost = 1; continue; }
         long wait = 60 - (long)(time(NULL) % 60);
-        while (wait > 0 && doc_open(doc)) { nap(2000000); wait -= 2; }
+        while (wait > 0 && page_on_screen()) { nap(2000000); wait -= 2; }
     }
 }

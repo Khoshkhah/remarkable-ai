@@ -1692,7 +1692,7 @@ def feed_dash_usage(host, sub):
                    input=text.encode(), capture_output=True)
 
 
-def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard"):
+def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", no_push=False):
     """Put the dashboard on the tablet: push the printed page into the `app` folder, bake the strokes,
     install app/rmdash with a systemd unit. With `token_file` (a Claude Code credential file of a login
     made for the tablet) the tablet fetches Claude usage itself; otherwise the PC's standby cron feeds it."""
@@ -1711,14 +1711,19 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard"):
     if token_file:
         creds = json.load(open(os.path.expanduser(token_file)))["claudeAiOauth"]
         token = f"access={creds['accessToken']}\nrefresh={creds['refreshToken']}\nexpires={int(creds.get('expiresAt', 0)) // 1000}\n"
-    run_ssh("systemctl stop rmdash 2>/dev/null; true", host=host)
-    page = render_dashboard_image(battery_info=get_tablet_battery_info(host=host), tasks=tasks, live="tablet", weather=weather)
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        pdf = f.name
-    page.save(pdf, "PDF", resolution=226.0)
-    print(f"📄 Pushing the '{doc_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
-    doc_uuid = cmd_push(argparse.Namespace(file=pdf, folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
-    os.unlink(pdf)
+    run_ssh("systemctl stop rmdash 2>/dev/null; true", host=host)   # never push (the app restarts) under a running program
+    existing = next((nb["uuid"] for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
+    if no_push and existing:
+        doc_uuid = existing
+        print(f"📄 Keeping the '{doc_title}' page already on the tablet (no push, no reload)", flush=True)
+    else:
+        page = render_dashboard_image(battery_info=get_tablet_battery_info(host=host), tasks=tasks, live="tablet", weather=weather)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            pdf = f.name
+        page.save(pdf, "PDF", resolution=226.0)
+        print(f"📄 Pushing the '{doc_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
+        doc_uuid = cmd_push(argparse.Namespace(file=pdf, folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
+        os.unlink(pdf)
     content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
     pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
     page_id = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
@@ -2691,7 +2696,8 @@ def cmd_dashboard(args):
         token_file = getattr(args, "token_file", None)
         if token_file is None and os.path.exists(os.path.expanduser("~/.claude-tablet/.credentials.json")):
             token_file = "~/.claude-tablet/.credentials.json"
-        install_dash_app(target_host, city, token_file, tasks=[(t, False) for t in args.task] if getattr(args, "task", None) else None)
+        install_dash_app(target_host, city, token_file, tasks=[(t, False) for t in args.task] if getattr(args, "task", None) else None,
+                         no_push=getattr(args, "no_push", False))
         return
 
     mode = getattr(args, "mode", "standby")
@@ -2967,7 +2973,7 @@ def main():
     p_dash.add_argument("--city", type=str, default=None, help="City for the weather report (Open-Meteo, no key); remembered in the config")
     p_dash.add_argument("--live", action="store_true", help="With --mode doc: push the page once as a template, then keep drawing HH:MM and the Claude usage bars on it with the pen (no reloads)")
     p_dash.add_argument("--usage-interval", type=float, default=5, help="Minutes between usage refreshes in --live mode (default 5)")
-    p_dash.add_argument("--no-push", action="store_true", help="With --live: don't push the template again, draw on the dashboard page already open on the tablet")
+    p_dash.add_argument("--no-push", action="store_true", help="With --live or --install: don't push the page again (no reload), use the dashboard page already on the tablet")
     p_dash.add_argument("--install", action="store_true", help="Install the dashboard on the tablet itself: it draws time, date, calendar, weather and Claude usage whenever its Dashboard page is open, no PC needed (see app/)")
     p_dash.add_argument("--uninstall", action="store_true", help="Remove the tablet-resident dashboard again")
     p_dash.add_argument("--token-file", type=str, default=None, help="With --install: a Claude Code credential file of a login made for the tablet (default ~/.claude-tablet/.credentials.json if it exists), so the tablet fetches its usage itself")
