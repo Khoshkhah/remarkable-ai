@@ -220,21 +220,65 @@ def analyze_with_ai(image_path, action="summarize", prompt=None):
 
 def cmd_devices(args):
     cfg = load_config()
+    devices = cfg.get("devices", {})
+    active = cfg.get("active_device", "rm2")
+
+    # If user provided a device name: switch directly
     if args.switch:
-        if args.switch in cfg["devices"]:
-            cfg["active_device"] = args.switch
+        target = args.switch.strip()
+        if target in devices:
+            cfg["active_device"] = target
             save_config(cfg)
-            print(f"✅ Switched active reMarkable device to: '{args.switch}' ({cfg['devices'][args.switch]['name']})")
+            print(f"Switched active tablet to: [{target}] {devices[target].get('name', target)}")
         else:
-            print(f"❌ Unknown device '{args.switch}'. Available devices: {list(cfg['devices'].keys())}")
+            print(f"Unknown device '{target}'. Available: {list(devices.keys())}")
         return
 
-    print("\n📱 Configured reMarkable Tablets:")
-    active = cfg.get("active_device", "rm2")
-    for key, d in cfg["devices"].items():
-        marker = "🟢 ACTIVE" if key == active else "⚪"
-        print(f"  {marker} {key:<10} - {d.get('name', key)} (Host: {d.get('host', key)})")
-    print(f"\nTip: Switch active tablet with: rm-ai device <name>\n")
+    # If interactive selection requested
+    print("\nConfigured reMarkable Tablets:")
+    dev_keys = list(devices.keys())
+    for i, key in enumerate(dev_keys, 1):
+        d = devices[key]
+        marker = "[ACTIVE]" if key == active else "        "
+        print(f"  {i}. {marker} {key:<10} - {d.get('name', key)} (IP: {d.get('ip', 'N/A')})")
+    print()
+
+    try:
+        choice = input("Select tablet number or name to activate (Enter to keep current): ").strip()
+        if not choice:
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(dev_keys):
+            target = dev_keys[int(choice) - 1]
+        elif choice in devices:
+            target = choice
+        else:
+            print(f"Invalid selection: {choice}")
+            return
+        cfg["active_device"] = target
+        save_config(cfg)
+        print(f"Switched active tablet to: [{target}] {devices[target].get('name', target)}\n")
+    except (KeyboardInterrupt, EOFError):
+        print()
+
+def cmd_add_device(args):
+    cfg = load_config()
+    key = args.id or input("Enter device identifier (e.g. rm-office, rm-pro): ").strip()
+    if not key:
+        print("Device ID cannot be empty.")
+        return
+    name = args.name or input("Enter display name (e.g. reMarkable Office): ").strip() or key
+    ip = args.ip or input("Enter Wi-Fi IP address (e.g. 192.168.18.19): ").strip()
+
+    cfg.setdefault("devices", {})[key] = {
+        "host": key,
+        "name": name,
+        "ip": ip
+    }
+    save_config(cfg)
+    print(f"Added device [{key}] ({name}) at {ip}!")
+    print(f"To configure SSH, add this to ~/.ssh/config:\n")
+    print(f"Host {key}\n    HostName {ip}\n    User root\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\n")
+
 
 def main():
     parser = argparse.ArgumentParser(description="rm-ai: Wireless AI Note Assistant for reMarkable")
@@ -243,8 +287,16 @@ def main():
 
     # devices
     p_dev = subparsers.add_parser("devices", aliases=["device"], help="List or switch active reMarkable tablet")
-    p_dev.add_argument("switch", nargs="?", default=None, help="Device name to activate (e.g. rm2, rm-alt)")
+    p_dev.add_argument("switch", nargs="?", default=None, help="Device name or number to activate")
     p_dev.set_defaults(func=cmd_devices)
+
+    # add-device
+    p_add = subparsers.add_parser("add-device", help="Register a new reMarkable tablet")
+    p_add.add_argument("--id", type=str, default=None, help="Device identifier (e.g. rm-office)")
+    p_add.add_argument("--name", type=str, default=None, help="Display name")
+    p_add.add_argument("--ip", type=str, default=None, help="Wi-Fi IP address")
+    p_add.set_defaults(func=cmd_add_device)
+
 
     # list
     p_list = subparsers.add_parser("list", help="List all notebooks on reMarkable")
