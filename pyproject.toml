@@ -24,6 +24,10 @@ dependencies = [
 [project.scripts]
 rm-ai = "rm_ai:main"
 
+[tool.setuptools]
+py-modules = ["rm_ai"]
+
 [project.urls]
 Homepage = "https://github.com/Khoshkhah/remarkable-ai"
 Repository = "https://github.com/Khoshkhah/remarkable-ai.git"
+
