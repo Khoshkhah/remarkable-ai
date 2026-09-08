@@ -579,7 +579,7 @@ def ensure_remote_folder(folder_path, host=None):
                     json.dump(content, f, indent=2)
                 
                 target = host or get_active_host()
-                subprocess.run(["scp", "-q", m_path, c_path, f"{target}:{REMOTE_PATH}/"], check=True)
+                subprocess.run(["scp", "-q"] + get_ssh_base_opts() + [m_path, c_path, f"{target}:{REMOTE_PATH}/"], check=True)
             
             folders[new_f_uuid] = {"name": part, "parent": current_parent}
             current_parent = new_f_uuid
@@ -1502,6 +1502,7 @@ class DigitalClock:
 
 
 TABLET_APP_DIR = "/home/root/.local/share/rmclock"   # where the tablet-resident clock lives
+CLOCK_FOLDER = "app"                                  # the library folder holding the documents tablet apps run in
 RMCLOCK_UNIT = """[Unit]
 Description=rm-ai clock, drawn by the tablet while its Clock document is open
 
@@ -1565,12 +1566,18 @@ def install_clock_app(host, clock, doc_title, interval, fmt):
     if not binary.exists():
         print("❌ app/rmclock is missing: build it with app/build.sh (needs Docker)")
         return
-    doc = next((nb for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"] == "/"), None)
+    run_ssh("systemctl stop rmclock 2>/dev/null; true", host=host)   # an earlier install must not draw through the changes below
+    same_title = [nb for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower()]
+    doc = next((nb for nb in same_title if nb["folder"].lower() == CLOCK_FOLDER), None) or (same_title[0] if same_title else None)
     if doc is None:
-        print(f"📄 Pushing a blank '{doc_title}' document (the tablet reloads once)...", flush=True)
-        doc_uuid = push_chat_document(host, doc_title, pages=1)
+        print(f"📄 Pushing a blank '{doc_title}' document into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
+        doc_uuid = push_chat_document(host, doc_title, pages=1, folder=CLOCK_FOLDER)
     else:
         doc_uuid = doc["uuid"]
+        if doc["folder"].lower() != CLOCK_FOLDER:   # an existing document of that name: move it into the folder
+            folder_uuid = ensure_remote_folder(CLOCK_FOLDER, host=host)
+            run_ssh(f"sed -i 's/\"parent\": \"[^\"]*\"/\"parent\": \"{folder_uuid}\"/' {REMOTE_PATH}/{doc_uuid}.metadata && systemctl restart xochitl", host=host)
+            print(f"📁 Moved '{doc_title}' into the '{CLOCK_FOLDER}' folder (the tablet reloads once)")
     content = json.loads(run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
     pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
     page = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
@@ -1584,7 +1591,7 @@ def install_clock_app(host, clock, doc_title, interval, fmt):
         shutil.copy(binary, out / "rmclock")
         (out / "rmclock.service").write_text(RMCLOCK_UNIT)
         print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes and the replayer on the tablet...", flush=True)
-        run_ssh(f"systemctl stop rmclock 2>/dev/null; rm -rf {TABLET_APP_DIR}; mkdir -p {TABLET_APP_DIR}", host=host)
+        run_ssh(f"rm -rf {TABLET_APP_DIR}; mkdir -p {TABLET_APP_DIR}", host=host)
         tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
         subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_APP_DIR} -xf -"], input=tar, check=True)
     run_ssh(f"chmod +x {TABLET_APP_DIR}/rmclock && mv {TABLET_APP_DIR}/rmclock.service /etc/systemd/system/ && "
@@ -2365,7 +2372,7 @@ poll();
 </script>"""
 
 
-def push_chat_document(host, title, pages=10):
+def push_chat_document(host, title, pages=10, folder=None):
     """Push `pages` blank pages (a small header each) as the chat document; returns its uuid."""
     from PIL import Image, ImageDraw
     ims = []
@@ -2378,7 +2385,7 @@ def push_chat_document(host, title, pages=10):
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         pdf = f.name
     ims[0].save(pdf, "PDF", resolution=226.0, save_all=True, append_images=ims[1:])
-    uuid_ = cmd_push(argparse.Namespace(file=pdf, folder=None, title=title, force_new=False, margins=0, fresh=True, device=None))
+    uuid_ = cmd_push(argparse.Namespace(file=pdf, folder=folder, title=title, force_new=False, margins=0, fresh=True, device=None))
     os.unlink(pdf)
     return uuid_
 

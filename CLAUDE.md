@@ -116,7 +116,8 @@ tick loop sleeps to the next wall-clock second, so drawing time cannot drift or 
 
 **Tablet-resident clock** (`clock --install`, `app/`): the one thing that runs *on* the tablet.
 `StrokeRecorder` is a `VirtualStylus` with zero pacing that keeps the bytes instead of sending them;
-`bake_clock_app()` records every stroke of a `DigitalClock` into one file per stroke
+the clock document lives in the tablet's `CLOCK_FOLDER` ("app"; an existing document of that title is
+moved there by editing its `.metadata` parent); `bake_clock_app()` records every stroke of a `DigitalClock` into one file per stroke
 (`d<slot><seg>`/`e<slot><seg>`, `colon<i>`, `frame`), and `install_clock_app()` ships those, a
 `config` (document uuid, page `.rm` path, slots, strftime format, interval), the PC's `/etc/localtime`
 (the tablet runs on UTC) and the static ARMv7 binary `app/rmclock` to `/home/root/.local/share/rmclock`
