@@ -76,6 +76,18 @@ This document defines the complete catalog of commands available across:
 
 ---
 
+## Category 7: Dedicated Fullscreen Clock & Productivity Dashboard
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| **`rm-ai dashboard`** / **`/rm-dashboard`** | `rm-ai dashboard [--mode standby\|doc\|live] [--suspend] [--restore] [--quote "..."] [--task "..."]` | Turns the tablet into a dedicated executive desk clock and productivity dashboard. Displays giant digital clock, date, monthly calendar with today highlighted, live battery telemetry, daily habits, action items, and ruled handwriting notes. |
+| **`rm-ai dashboard --mode standby`** | `rm-ai dashboard --mode standby [--suspend]` | Sets `/usr/share/remarkable/suspended.png` so the dashboard displays whenever the tablet sleeps with zero power consumption. Use `--suspend` to display immediately. |
+| **`rm-ai dashboard --mode doc`** | `rm-ai dashboard --mode doc [--title "..."] [--folder "..."]` | Generates a 226 DPI vector notebook and uploads it wirelessly into tablet documents for live handwriting with the Marker stylus. |
+| **`rm-ai dashboard --restore`** | `rm-ai dashboard --restore` | Restores the original factory reMarkable sleep screen from automatic backup. |
+
+---
+
+
 ## Example Workflow in Claude or Gemini:
 
 ```text

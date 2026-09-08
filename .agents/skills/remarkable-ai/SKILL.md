@@ -26,12 +26,27 @@ When the user asks to read, transcribe, summarize, or analyze a page from any no
    - Extract actionable to-dos and next steps.
 5. Delete `temp_page.png` after inspection.
 
-### 3. Tablet & Device Management:
+### 3. Dedicated Fullscreen Clock & Productivity Dashboard:
+When the user asks to turn the tablet into a desk clock, standby dashboard, or daily planner:
+- Run: `rm-ai dashboard` (updates tablet sleep screen with zero battery drain)
+- Run: `rm-ai dashboard --suspend` (puts tablet to sleep immediately so dashboard appears right away)
+- Run: `rm-ai dashboard --mode doc` (creates interactive notebook document on tablet for physical writing)
+
+### 4. Real-Time Digital Clock & Live Vector Drawing:
+- Real-time 7-segment digital clock: `rm-ai clock --pos top-right`
+- Single time stamp: `rm-ai clock --once`
+- Inject vector strokes: `rm-ai draw line --from X1,Y1 --to X2,Y2`
+
+### 5. Pushing Documents:
+- Upload PDF or Markdown document: `rm-ai push file.pdf --folder "Work"`
+
+### 6. Tablet & Device Management:
 - To switch active tablets: `rm-ai devices [number_or_name]`
-- To register a new tablet: `rm-ai add-device`
+- To register or setup a tablet: `rm-ai setup` or `rm-ai add-device`
 - To target a specific tablet for a single command: `rm-ai --device <name> list`
 
 ## Architecture:
-- Connection: SSH over Wi-Fi (`ssh rm2` or `ssh root@<IP>`)
+- Connection: SSH over Wi-Fi (`root@<IP>`) with isolated known_hosts
 - Storage root: `/home/root/.local/share/remarkable/xochitl/`
 - Vector parser: `rmscene` v6 lines parser with SVG/Cairo rendering.
+

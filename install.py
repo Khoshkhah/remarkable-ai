@@ -97,19 +97,33 @@ def main():
     # 4. Check tablet connection
     print("\n📡 Step 3: Checking reMarkable tablet connectivity...")
     try:
-        from rm_ai import load_config
+        from rm_ai import load_config, get_ssh_base_opts, setup_wizard
         cfg = load_config()
-        active = cfg.get("active_device", "rm2")
-        dev = cfg.get("devices", {}).get(active, {})
-        host = dev.get("host", active)
-        res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, "echo ok"], capture_output=True, text=True)
-        if res.returncode == 0:
-            print(f"   Connected to reMarkable tablet [{active}] ({host}) wirelessly!")
-        else:
-            print(f"   Tablet [{active}] ({host}) not reachable over SSH.")
-            print("   Ensure tablet Wi-Fi SSH is enabled. You can register your tablet with: rm-ai add-device")
+        active = cfg.get("active_device")
+        dev = cfg.get("devices", {}).get(active, {}) if active else {}
+        ip = dev.get("ip")
+        host = f"root@{ip}" if ip else dev.get("host")
+
+        connected = False
+        if host:
+            test_cmd = ["ssh", "-o", "BatchMode=yes"] + get_ssh_base_opts() + [host, "echo ok"]
+            res = subprocess.run(test_cmd, capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip() == "ok":
+                connected = True
+                print(f"   Connected to reMarkable tablet [{active}] ({host}) wirelessly!")
+
+        if not connected:
+            print("   No active reMarkable tablet connection verified.")
+            try:
+                ans = input("   Would you like to connect your tablet now? [Y/n]: ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                ans = "n"
+            if ans in ("", "y", "yes"):
+                setup_wizard()
+            else:
+                print("   You can connect your tablet at any time by running: rm-ai setup")
     except Exception as e:
-        print(f"   SSH check skipped ({e}).")
+        print(f"   Notice: {e}")
 
     print("\n" + "=" * 60)
     print("Setup completed successfully!")

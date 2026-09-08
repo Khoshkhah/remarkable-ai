@@ -14,27 +14,12 @@ This repository connects AI agents (Claude, Antigravity, Gemini) wirelessly to r
    ```bash
    python install.py
    ```
-   Or install manually in an active virtual environment:
-   ```bash
-   pip install -e .
-   ```
+   The installer sets up dependencies, configures Claude Code slash commands, and launches the interactive tablet connection wizard to authorize your SSH key automatically without requiring `ssh-copy-id`.
 
-3. Ensure passwordless SSH access to the tablet:
-   - Find tablet IP under: Settings > Help > Copyrights and licenses > General information (GPLv3).
-   - Authorize your SSH key:
-     ```bash
-     ssh-copy-id root@<tablet-ip>
-     ```
-   - Verify connection:
-     ```bash
-     ssh root@<tablet-ip> "echo ok"
-     ```
-
-4. Register the tablet in reMarkable AI:
+3. Alternatively, connect or register your tablet at any time:
    ```bash
-   rm-ai add-device
+   rm-ai setup
    ```
-   Follow the prompts to enter a device alias (e.g. `rm2`) and the tablet IP address.
 
 ## Command & Shorthand Handling
 
@@ -68,10 +53,22 @@ Whenever the user inputs any of the following triggers (with or without a leadin
   rm-ai push "<file>" --folder "<folder>"
   ```
 
-- **`rm-setup`** or **`/rm-setup`**:
-  Refresh dependencies and agent commands:
+- **`rm-dashboard [--mode standby|doc] [--suspend]`** or **`/rm-dashboard`**:
+  Turn tablet into an executive desk clock and productivity dashboard:
   ```bash
-  python install.py
+  rm-ai dashboard --mode standby --suspend
+  ```
+
+- **`rm-clock [--pos pos] [--duration N]`** or **`/rm-clock`**:
+  Run live 7-segment digital clock on active notebook page via Virtual Stylus:
+  ```bash
+  rm-ai clock
+  ```
+
+- **`rm-setup`** or **`/rm-setup`**:
+  Run interactive setup wizard and refresh agent slash commands:
+  ```bash
+  rm-ai setup
   ```
 
 ## Architecture & File Layout

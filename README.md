@@ -148,6 +148,13 @@ rm-ai push notes.md --folder "AI-Summaries" --title "Morning Brief"
 # Target specific tablet
 rm-ai --device rm-alt read
 
+# Dedicated Fullscreen Clock & Productivity Dashboard (0-Power Standby)
+rm-ai dashboard
+rm-ai dashboard --suspend
+
+# Push interactive dashboard notebook for physical note-taking
+rm-ai dashboard --mode doc --title "Daily Dashboard"
+
 # Live 7-segment digital clock via Virtual Stylus (zero reload / zero restart)
 rm-ai clock --pos top-right
 rm-ai clock --pos center --duration 60 --clear
@@ -156,6 +163,31 @@ rm-ai clock --pos center --duration 60 --clear
 rm-ai draw line --from 200,300 --to 800,300
 rm-ai draw box --at 400,500 --size 300,200
 ```
+
+---
+
+## Dedicated Fullscreen Clock & Productivity Dashboard
+
+Turn your reMarkable 2 into a dedicated minimalist executive desk display:
+
+- **Zero-Power Standby Display (`--mode standby`)**:
+  Updates `/usr/share/remarkable/suspended.png` with a clean Swiss typography clock, full-month calendar with today highlighted, live battery telemetry read from the tablet kernel, daily habits, action items, and notebook ruled lines. When the tablet is asleep, it holds this high-contrast display indefinitely with zero battery drain.
+  ```bash
+  # Generate and push dashboard to sleep screen:
+  rm-ai dashboard
+
+  # Push and put tablet to sleep immediately:
+  rm-ai dashboard --suspend
+
+  # Restore original factory sleep screen:
+  rm-ai dashboard --restore
+  ```
+
+- **Interactive Notebook Document (`--mode doc`)**:
+  Generates a 226 DPI vector document and uploads it wirelessly into tablet documents as "Daily Dashboard". You can open it and write notes, check off checkboxes, or sketch directly with your physical Marker stylus:
+  ```bash
+  rm-ai dashboard --mode doc --title "Daily Dashboard"
+  ```
 
 ---
 

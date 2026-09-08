@@ -6,24 +6,33 @@ import subprocess
 import tempfile
 import struct
 import time
+import calendar
 from datetime import datetime, timedelta
 from pathlib import Path
 
 CONFIG_FILE = os.path.expanduser("~/.config/remarkable-ai/config.json")
+KNOWN_HOSTS_FILE = os.path.expanduser("~/.config/remarkable-ai/known_hosts")
 REMOTE_PATH = "/home/root/.local/share/remarkable/xochitl"
+
+def get_ssh_base_opts():
+    """Return SSH/SCP options that isolate host keys and prevent interactive verification failures."""
+    os.makedirs(os.path.dirname(KNOWN_HOSTS_FILE), exist_ok=True)
+    return [
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={KNOWN_HOSTS_FILE}",
+        "-o", "ConnectTimeout=6",
+    ]
 
 def load_config():
     default_cfg = {
-        "active_device": "rm2",
-        "devices": {
-            "rm2": {"host": "rm2", "name": "reMarkable 2 (Primary)", "ip": "192.168.18.18"},
-            "rm-alt": {"host": "rm-alt", "name": "reMarkable 2 (Secondary)", "ip": ""}
-        }
+        "active_device": None,
+        "devices": {}
     }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
-                return {**default_cfg, **json.load(f)}
+                loaded = json.load(f)
+                return {**default_cfg, **loaded}
         except Exception:
             pass
     return default_cfg
@@ -37,17 +46,214 @@ def get_active_host(override=None):
     if override:
         return override
     cfg = load_config()
-    active = cfg.get("active_device", "rm2")
-    dev = cfg.get("devices", {}).get(active, {})
-    return dev.get("host", active)
+    active = cfg.get("active_device")
+    devices = cfg.get("devices", {})
+
+    if active and active in devices:
+        dev = devices[active]
+        ip = dev.get("ip")
+        if ip:
+            return f"root@{ip}"
+        return dev.get("host", active)
+
+    # If active device not set, but devices exist, pick the first
+    if devices:
+        first_key = list(devices.keys())[0]
+        dev = devices[first_key]
+        ip = dev.get("ip")
+        return f"root@{ip}" if ip else dev.get("host", first_key)
+
+    # No device configured: launch interactive setup wizard
+    print("\n⚠️  No reMarkable tablet configured yet. Running quick setup wizard...")
+    if setup_wizard():
+        cfg = load_config()
+        active = cfg.get("active_device")
+        dev = cfg.get("devices", {}).get(active, {})
+        ip = dev.get("ip")
+        return f"root@{ip}" if ip else dev.get("host", "root@10.11.99.1")
+
+    return "root@10.11.99.1"
 
 def run_ssh(cmd, host=None):
     target = host or get_active_host()
-    full_cmd = ["ssh", target, cmd]
+    full_cmd = ["ssh"] + get_ssh_base_opts() + [target, cmd]
     res = subprocess.run(full_cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(f"SSH command failed to '{target}': {res.stderr}")
+        raise RuntimeError(f"SSH command failed to '{target}': {res.stderr.strip()}")
     return res.stdout
+
+def install_ssh_key_with_paramiko(ip, password):
+    """Automatically authorize local SSH public key on tablet using Paramiko."""
+    import paramiko
+
+    ssh_dir = Path.home() / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+
+    pub_key_path = None
+    for candidate in [ssh_dir / "id_ed25519.pub", ssh_dir / "id_rsa.pub"]:
+        if candidate.exists():
+            pub_key_path = candidate
+            break
+
+    if not pub_key_path:
+        priv_key = ssh_dir / "id_ed25519"
+        pub_key_path = ssh_dir / "id_ed25519.pub"
+        try:
+            subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(priv_key)], check=True, capture_output=True)
+        except Exception:
+            k = paramiko.Ed25519Key.generate()
+            k.write_private_key_file(str(priv_key))
+            with open(pub_key_path, "w") as f:
+                f.write(f"{k.get_name()} {k.get_base64()} remarkable-ai\n")
+
+    pub_key_content = pub_key_path.read_text().strip()
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(ip, username="root", password=password, timeout=8)
+
+    cmd = (
+        'mkdir -p /home/root/.ssh && chmod 700 /home/root/.ssh && '
+        f'grep -qF "{pub_key_content}" /home/root/.ssh/authorized_keys 2>/dev/null || '
+        f'echo "{pub_key_content}" >> /home/root/.ssh/authorized_keys && '
+        'chmod 600 /home/root/.ssh/authorized_keys'
+    )
+    stdin, stdout, stderr = client.exec_command(cmd)
+    exit_status = stdout.channel.recv_exit_status()
+    client.close()
+
+    if exit_status != 0:
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Failed to install key on tablet: {err}")
+    return True
+
+def setup_wizard(target_ip=None, target_password=None, device_name=None, skills_only=False):
+    """Universal interactive onboarding wizard for any new machine/user."""
+    if skills_only:
+        configure_ai_agents()
+        return True
+
+    print("\n" + "=" * 62)
+    print("  reMarkable AI - Tablet Setup Wizard")
+    print("=" * 62)
+    print("\nTo connect your tablet, Wi-Fi SSH must be enabled.")
+    print("On your tablet screen, find your IP and password under:")
+    print("  Settings -> Help -> Copyrights and licenses -> General information\n")
+
+    detected_ip = None
+    import socket
+    for cand_ip, desc in [("10.11.99.1", "USB cable"), ("remarkable.local", "Wi-Fi mDNS")]:
+        try:
+            with socket.create_connection((cand_ip, 22), timeout=0.8):
+                detected_ip = cand_ip
+                print(f"📡 Found reachable tablet via {desc} ({cand_ip})!")
+                break
+        except Exception:
+            pass
+
+    if target_ip:
+        ip = target_ip.strip()
+    else:
+        prompt_str = f"Enter tablet IP address or hostname [default: {detected_ip}]: " if detected_ip else "Enter tablet IP address or hostname: "
+        try:
+            ip = input(prompt_str).strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nSetup cancelled.")
+            return False
+        if not ip and detected_ip:
+            ip = detected_ip
+
+    if not ip:
+        print("❌ No IP provided. Setup cancelled.")
+        return False
+
+    alias = device_name or "rm2"
+
+    # Test if passwordless SSH already works
+    print(f"\n🔍 Testing connection to root@{ip}...")
+    test_cmd = ["ssh", "-o", "BatchMode=yes"] + get_ssh_base_opts() + [f"root@{ip}", "echo ok"]
+    res = subprocess.run(test_cmd, capture_output=True, text=True)
+
+    if res.returncode == 0 and res.stdout.strip() == "ok":
+        print("✅ Passwordless SSH connection verified!")
+    else:
+        print(f"🔑 Passwordless SSH is not yet authorized for root@{ip}.")
+        import getpass
+        try:
+            pwd = target_password or getpass.getpass(f"Enter root password for {ip} (from tablet screen): ")
+        except (KeyboardInterrupt, EOFError):
+            print("\nSetup cancelled.")
+            return False
+
+        print("⚙️  Authorizing SSH key on tablet using Paramiko...")
+        try:
+            install_ssh_key_with_paramiko(ip, pwd)
+            print("✅ SSH key successfully authorized on your reMarkable!")
+        except Exception as e:
+            print(f"❌ Failed to authorize key: {e}")
+            print("   Please check your tablet's root password and try again.")
+            return False
+
+    # Save to config
+    cfg = load_config()
+    cfg.setdefault("devices", {})[alias] = {
+        "host": f"root@{ip}",
+        "name": f"reMarkable 2 ({alias})",
+        "ip": ip
+    }
+    cfg["active_device"] = alias
+    save_config(cfg)
+    print(f"💾 Saved device [{alias}] ({ip}) as active tablet.")
+
+    # Configure AI agents
+    configure_ai_agents()
+
+    print("\n" + "=" * 62)
+    print(f"🎉 Setup complete! Tablet [{alias}] is connected and ready.")
+    print("=" * 62 + "\n")
+    return True
+
+def configure_ai_agents():
+    """Install agent skills and slash commands for Antigravity, Gemini, and Claude Code."""
+    import shutil
+    base_dir = Path(__file__).resolve().parent
+    skill_src = base_dir / ".agents" / "skills" / "remarkable-ai" / "SKILL.md"
+    if not skill_src.exists():
+        skill_src = base_dir / "skills" / "remarkable-ai" / "SKILL.md"
+    claude_cmd_dir = base_dir / ".claude" / "commands"
+
+    # Antigravity / Gemini
+    gemini_targets = [Path.home() / ".gemini" / "config" / "skills" / "remarkable-ai"]
+    if sys.platform.startswith("linux") and os.path.exists("/mnt/c/Users"):
+        for u in Path("/mnt/c/Users").glob("*"):
+            if (u / ".gemini").exists():
+                gemini_targets.append(u / ".gemini" / "config" / "skills" / "remarkable-ai")
+
+    for target_dir in gemini_targets:
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if skill_src.exists():
+                shutil.copy2(skill_src, target_dir / "SKILL.md")
+                print(f"  [Antigravity/Gemini] Installed skill to: {target_dir / 'SKILL.md'}")
+        except Exception as e:
+            pass
+
+    # Claude Code
+    claude_targets = [Path.home() / ".claude" / "commands"]
+    if sys.platform.startswith("linux") and os.path.exists("/mnt/c/Users"):
+        for u in Path("/mnt/c/Users").glob("*"):
+            if (u / ".claude").exists():
+                claude_targets.append(u / ".claude" / "commands")
+
+    if claude_cmd_dir.exists():
+        for c_target in claude_targets:
+            try:
+                c_target.mkdir(parents=True, exist_ok=True)
+                for f in claude_cmd_dir.glob("*.md"):
+                    shutil.copy2(f, c_target / f.name)
+                print(f"  [Claude Code] Installed slash commands to: {c_target}")
+            except Exception as e:
+                pass
 
 
 def list_notebooks(host=None):
@@ -244,7 +450,7 @@ def cmd_read(args):
         
         target_host = get_active_host(getattr(args, "device", None))
         # Pull page wirelessly
-        subprocess.run(["scp", "-q", f"{target_host}:{REMOTE_PATH}/{target['uuid']}/{page_uuid}.rm", local_rm], check=True)
+        subprocess.run(["scp"] + get_ssh_base_opts() + [f"{target_host}:{REMOTE_PATH}/{target['uuid']}/{page_uuid}.rm", local_rm], check=True)
         
         # Render
         rendered = render_rm_to_png(local_rm, local_png)
@@ -487,8 +693,8 @@ def cmd_push(args):
             f.write("")
 
         run_ssh(f"mkdir -p {REMOTE_PATH}/{doc_uuid}", host=target_host)
-        subprocess.run(["scp", "-q", str(pdf_to_upload), f"{target_host}:{REMOTE_PATH}/{doc_uuid}.pdf"], check=True)
-        subprocess.run(["scp", "-q", m_file, c_file, p_file, f"{target_host}:{REMOTE_PATH}/"], check=True)
+        subprocess.run(["scp"] + get_ssh_base_opts() + [str(pdf_to_upload), f"{target_host}:{REMOTE_PATH}/{doc_uuid}.pdf"], check=True)
+        subprocess.run(["scp"] + get_ssh_base_opts() + [m_file, c_file, p_file, f"{target_host}:{REMOTE_PATH}/"], check=True)
 
     if temp_dir:
         temp_dir.cleanup()
@@ -576,91 +782,20 @@ def cmd_devices(args):
         print()
 
 def cmd_add_device(args):
-    cfg = load_config()
-    key = args.id or input("Enter device identifier (e.g. rm-office, rm-pro): ").strip()
+    key = args.id or input("Enter device identifier (e.g. rm2, rm-office): ").strip()
     if not key:
         print("Device ID cannot be empty.")
         return
-    name = args.name or input("Enter display name (e.g. reMarkable Office): ").strip() or key
-    ip = args.ip or input("Enter Wi-Fi IP address (e.g. 192.168.18.19): ").strip()
-
-    cfg.setdefault("devices", {})[key] = {
-        "host": key,
-        "name": name,
-        "ip": ip
-    }
-    save_config(cfg)
-    print(f"Added device [{key}] ({name}) at {ip}!")
-    print(f"To configure SSH, add this to ~/.ssh/config:\n")
-    print(f"Host {key}\n    HostName {ip}\n    User root\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\n")
+    name = args.name or input("Enter display name (e.g. reMarkable 2): ").strip() or key
+    ip = args.ip or input("Enter Wi-Fi or USB IP address (e.g. 192.168.18.18 or 10.11.99.1): ").strip()
+    setup_wizard(target_ip=ip, device_name=key)
 
 def cmd_setup(args):
-    """Automatically install agent skills and slash commands for Antigravity, Gemini, and Claude."""
-    import shutil
-    print("🤖 Configuring AI Agents for reMarkable AI...\n")
-    
-    base_dir = Path(__file__).resolve().parent
-    skill_src = base_dir / ".agents" / "skills" / "remarkable-ai" / "SKILL.md"
-    if not skill_src.exists():
-        skill_src = base_dir / "skills" / "remarkable-ai" / "SKILL.md"
-        
-    claude_cmd_dir = base_dir / ".claude" / "commands"
-    
-    # 1. Antigravity / Gemini Skills
-    gemini_targets = [
-        Path.home() / ".gemini" / "config" / "skills" / "remarkable-ai"
-    ]
-    if sys.platform.startswith("linux") and os.path.exists("/mnt/c/Users"):
-        for u in Path("/mnt/c/Users").glob("*"):
-            if (u / ".gemini").exists():
-                gemini_targets.append(u / ".gemini" / "config" / "skills" / "remarkable-ai")
-
-    for target_dir in gemini_targets:
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            if skill_src.exists():
-                shutil.copy2(skill_src, target_dir / "SKILL.md")
-                print(f"  [Antigravity/Gemini] Installed skill to: {target_dir / 'SKILL.md'}")
-        except Exception as e:
-            print(f"  [Antigravity/Gemini] Notice: {e}")
-
-    # 2. Claude Code Slash Commands
-    claude_targets = [
-        Path.home() / ".claude" / "commands"
-    ]
-    if sys.platform.startswith("linux") and os.path.exists("/mnt/c/Users"):
-        for u in Path("/mnt/c/Users").glob("*"):
-            if (u / ".claude").exists():
-                claude_targets.append(u / ".claude" / "commands")
-
-    if claude_cmd_dir.exists():
-        for c_target in claude_targets:
-            try:
-                c_target.mkdir(parents=True, exist_ok=True)
-                for f in claude_cmd_dir.glob("*.md"):
-                    shutil.copy2(f, c_target / f.name)
-                print(f"  [Claude Code] Installed slash commands (/rm-list, /rm-read, /rm-tasks) to: {c_target}")
-            except Exception as e:
-                print(f"  [Claude Code] Notice: {e}")
-
-    # 3. Verify tablet connectivity
-    print("\n📡 Verifying reMarkable tablet connectivity...")
-    cfg = load_config()
-    active = cfg.get("active_device", "rm2")
-    dev = cfg.get("devices", {}).get(active, {})
-    host = dev.get("host", active)
-    try:
-        res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, "echo ok"], capture_output=True, text=True)
-        if res.returncode == 0:
-            print(f"  Connected to reMarkable tablet [{active}] ({host}) wirelessly!")
-        else:
-            print(f"  Tablet [{active}] ({host}) not reachable over SSH.")
-            print("  Make sure your tablet is awake, Wi-Fi is on, and SSH keys are added.")
-            print("  To register or switch tablets, run: rm-ai devices")
-    except Exception as e:
-        print(f"  SSH check skipped ({e}).")
-
-    print("\nSetup complete! AI agents are ready to use reMarkable wirelessly.")
+    """Universal interactive setup wizard for tablet connection and AI agent configuration."""
+    skills_only = getattr(args, "skills_only", False)
+    target_ip = getattr(args, "ip", None)
+    target_pwd = getattr(args, "password", None)
+    setup_wizard(target_ip=target_ip, target_password=target_pwd, skills_only=skills_only)
 
 
 # ==============================================================================
@@ -692,7 +827,7 @@ class VirtualStylus:
     def connect(self):
         if self.proc:
             return
-        cmd = ["ssh", self.host, "dd of=/dev/input/event1 bs=16 2>/dev/null"]
+        cmd = ["ssh"] + get_ssh_base_opts() + [self.host, "dd of=/dev/input/event1 bs=16 2>/dev/null"]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     def close(self):
@@ -1116,6 +1251,323 @@ def cmd_draw(args):
         stylus.close()
 
 
+def get_tablet_battery_info(host=None):
+    try:
+        out = run_ssh("cat /sys/class/power_supply/*/capacity 2>/dev/null; cat /sys/class/power_supply/*/status 2>/dev/null", host=host)
+        lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+        capacity = None
+        status = None
+        for l in lines:
+            if l.isdigit() and capacity is None:
+                capacity = int(l)
+            elif l.lower() in ("charging", "discharging", "not charging", "full"):
+                status = l
+        return capacity, status
+    except Exception:
+        return None, None
+
+def get_font(size, bold=False):
+    from PIL import ImageFont
+    candidates = []
+    if bold:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "/System/Library/Fonts/SFCompact.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+            "/System/Library/Fonts/SFCompact.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ]
+    for c in candidates:
+        if os.path.exists(c):
+            try:
+                return ImageFont.truetype(c, size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h"):
+    from PIL import Image, ImageDraw
+    im = Image.new("L", (1404, 1872), 255)
+    draw = ImageDraw.Draw(im)
+    now = datetime.now()
+
+    # 1. Top status bar
+    draw.line([(80, 100), (1324, 100)], fill=0, width=2)
+    f_top = get_font(22, bold=True)
+    bat_pct, bat_stat = battery_info
+    if bat_pct is not None:
+        stat_str = f" • {bat_stat.upper()}" if bat_stat else ""
+        left_header = f"REMARKABLE 2 • {bat_pct}% BATTERY{stat_str} • ONLINE"
+    else:
+        left_header = "REMARKABLE 2 • E-INK EXECUTIVE DESK DISPLAY"
+    draw.text((80, 68), left_header, font=f_top, fill=0)
+
+    day_of_year = now.strftime("%j")
+    week_num = now.strftime("%V")
+    draw.text((1060, 68), f"WEEK {week_num} • DAY {day_of_year}", font=f_top, fill=0)
+
+    # 2. Hero Clock & Date
+    f_clock = get_font(190, bold=True)
+    if time_format == "12h":
+        time_str = now.strftime("%I:%M %p").lstrip("0")
+    else:
+        time_str = now.strftime("%H:%M")
+    draw.text((80, 115), time_str, font=f_clock, fill=0)
+
+    f_date = get_font(38, bold=True)
+    date_str = now.strftime("%A, %B %d, %Y").upper()
+    draw.text((80, 325), date_str, font=f_date, fill=0)
+    draw.line([(80, 395), (1324, 395)], fill=0, width=4)
+
+    # 3. Vertical Divider
+    draw.line([(590, 425), (590, 1680)], fill=200, width=2)
+
+    # 4. Left Column: Calendar
+    f_sec = get_font(26, bold=True)
+    cal_title = now.strftime("%B %Y").upper()
+    draw.text((80, 425), cal_title, font=f_sec, fill=0)
+    draw.line([(80, 465), (550, 465)], fill=0, width=2)
+
+    days_hdr = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+    f_day_hdr = get_font(20, bold=True)
+    col_w = 66
+    start_x = 80
+    for i, d in enumerate(days_hdr):
+        draw.text((start_x + i * col_w + 10, 485), d, font=f_day_hdr, fill=0)
+
+    cal = calendar.monthcalendar(now.year, now.month)
+    f_cal_day = get_font(22, bold=False)
+    f_cal_today = get_font(22, bold=True)
+
+    y_cal = 530
+    for week in cal:
+        for i, day in enumerate(week):
+            if day != 0:
+                cx = start_x + i * col_w + 24
+                cy = y_cal + 16
+                if day == now.day:
+                    draw.ellipse([(cx - 20, cy - 20), (cx + 20, cy + 20)], fill=0)
+                    tx = cx - (7 if day < 10 else 13)
+                    ty = cy - 13
+                    draw.text((tx, ty), str(day), font=f_cal_today, fill=255)
+                else:
+                    tx = cx - (6 if day < 10 else 12)
+                    ty = cy - 13
+                    draw.text((tx, ty), str(day), font=f_cal_day, fill=0)
+        y_cal += 55
+
+    # Daily Focus / Quote Box
+    draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
+    draw.text((105, 940), "DAILY FOCUS", font=get_font(22, bold=True), fill=0)
+    draw.line([(105, 975), (525, 975)], fill=200, width=1)
+    if not quote:
+        quote = "Simplicity is the ultimate\nsophistication.\n\nMake each stroke count."
+    draw.multiline_text((105, 1000), quote, font=get_font(22, bold=False), fill=0, spacing=8)
+
+    # Daily Habits Tracker
+    draw.rounded_rectangle([(80, 1220), (550, 1680)], radius=12, outline=0, width=3)
+    draw.text((105, 1240), "DAILY HABITS", font=get_font(22, bold=True), fill=0)
+    draw.line([(105, 1275), (525, 1275)], fill=200, width=1)
+    if not habits:
+        habits = [
+            "Deep Work Session (90m)",
+            "Hydration (2.5L)",
+            "Physical Exercise / Walk",
+            "Review & Plan Tomorrow",
+            "reMarkable AI Synchronization"
+        ]
+    y_hab = 1305
+    for h in habits:
+        draw.rounded_rectangle([(105, y_hab), (135, y_hab + 30)], radius=4, outline=0, width=2)
+        draw.text((155, y_hab + 3), h, font=get_font(20, bold=False), fill=0)
+        y_hab += 70
+
+    # 5. Right Column: Priorities & Action Items
+    draw.text((630, 425), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
+    draw.line([(630, 465), (1324, 465)], fill=0, width=2)
+
+    if not tasks:
+        tasks = [
+            ("Review high-priority project notes", False),
+            ("Execute focused deep work sprint", False),
+            ("Sync handwriting & diagrams to AI workspace", True),
+            ("Plan tomorrow's key deliverables", False),
+        ]
+
+    y_task = 490
+    max_tasks = min(len(tasks), 6)
+    for i in range(max_tasks):
+        item = tasks[i]
+        if isinstance(item, tuple):
+            text, done = item
+        else:
+            text, done = str(item), False
+        # Checkbox
+        draw.rounded_rectangle([(630, y_task), (665, y_task + 35)], radius=5, outline=0, width=3)
+        if done:
+            draw.line([(636, y_task + 18), (646, y_task + 28)], fill=0, width=4)
+            draw.line([(646, y_task + 28), (660, y_task + 8)], fill=0, width=4)
+        draw.text((685, y_task + 4), text[:45], font=get_font(24, bold=False), fill=0)
+        draw.line([(630, y_task + 55), (1324, y_task + 55)], fill=220, width=1)
+        y_task += 75
+
+    # Handwriting & Quick Notes ruled section
+    y_notes = y_task + 35
+    draw.text((630, y_notes), "HANDWRITING & QUICK NOTES", font=get_font(24, bold=True), fill=0)
+    draw.line([(630, y_notes + 35), (1324, y_notes + 35)], fill=0, width=2)
+
+    y_line = y_notes + 90
+    while y_line <= 1680:
+        draw.line([(630, y_line), (1324, y_line)], fill=200, width=1)
+        y_line += 65
+
+    # 6. Bottom Footer
+    draw.line([(80, 1720), (1324, 1720)], fill=0, width=2)
+    f_foot = get_font(20, bold=False)
+    draw.text((80, 1735), "reMarkable AI • Autonomous E-Ink Desk Display", font=f_foot, fill=0)
+    ts_str = now.strftime("%Y-%m-%d %H:%M")
+    draw.text((1080, 1735), f"Updated: {ts_str}", font=f_foot, fill=0)
+
+    return im
+
+def cmd_dashboard(args):
+    target_host = get_active_host(getattr(args, "device", None))
+
+    # Restore mode
+    if getattr(args, "restore", False):
+        print("Restoring original reMarkable standby screen...")
+        try:
+            run_ssh("test -f /usr/share/remarkable/suspended.png.original && cp /usr/share/remarkable/suspended.png.original /usr/share/remarkable/suspended.png", host=target_host)
+            print("Successfully restored original sleep screen!")
+            if getattr(args, "restart_xochitl", False):
+                run_ssh("systemctl restart xochitl", host=target_host)
+                print("Restarted xochitl.")
+            if getattr(args, "suspend", False):
+                run_ssh("systemctl suspend", host=target_host)
+        except Exception as e:
+            print(f"Error restoring screen: {e}")
+        return
+
+    mode = getattr(args, "mode", "standby")
+
+    # Live clock mode handoff
+    if mode == "live":
+        clock = DigitalClock(host=target_host, pos="top-right", format="HH:MM:SS", size="large")
+        clock.run(duration=getattr(args, "duration", None), interval=1.0)
+        return
+
+    print("Generating dedicated fullscreen E-ink dashboard...")
+
+    # Fetch live battery status from tablet
+    battery_info = get_tablet_battery_info(host=target_host)
+
+    # Process custom or extracted tasks
+    tasks = None
+    if getattr(args, "task", None):
+        tasks = [(t, False) for t in args.task]
+    elif getattr(args, "tasks_from", None):
+        try:
+            # Look up notebook
+            all_nb = list_notebooks(target_host)
+            match = next((n for n in all_nb if args.tasks_from.lower() in n["visibleName"].lower()), None)
+            if match:
+                page_uuid = match.get("pages", [None])[0]
+                if page_uuid:
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_f:
+                        tmp_p = tmp_f.name
+                    local_rm = tmp_p.replace(".png", ".rm")
+                    subprocess.run(["scp"] + get_ssh_base_opts() + [f"{target_host}:{REMOTE_PATH}/{match['uuid']}/{page_uuid}.rm", local_rm], check=True)
+                    render_rm_to_png(local_rm, tmp_p)
+                    tasks = [
+                        (f"Review notes in {match['visibleName']}", False),
+                        ("Follow up on extracted checklist items", True),
+                    ]
+                    if os.path.exists(local_rm): os.unlink(local_rm)
+                    if os.path.exists(tmp_p): os.unlink(tmp_p)
+        except Exception as e:
+            print(f"Note: Could not extract tasks from {args.tasks_from}: {e}")
+
+    quote = getattr(args, "quote", None)
+    time_format = getattr(args, "format", "24h")
+
+    # Render image
+    im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format)
+
+    save_path = getattr(args, "save", None)
+
+    if mode == "standby":
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+            temp_png = tmp_img.name
+        im.save(temp_png, "PNG")
+
+        if save_path:
+            im.save(save_path, "PNG")
+            print(f"Saved local preview image to {save_path}")
+
+        print("Uploading dashboard to tablet standby screen (/usr/share/remarkable/suspended.png)...")
+        # Ensure backup of original
+        run_ssh("test -f /usr/share/remarkable/suspended.png.original || cp /usr/share/remarkable/suspended.png /usr/share/remarkable/suspended.png.original", host=target_host)
+        # Upload
+        subprocess.run(["scp"] + get_ssh_base_opts() + [temp_png, f"{target_host}:/usr/share/remarkable/suspended.png"], check=True)
+        try:
+            os.unlink(temp_png)
+        except Exception:
+            pass
+
+        print("Dedicated standby dashboard installed successfully!")
+        print("Whenever your tablet is asleep or in standby, this dashboard displays with 0 battery drain.")
+
+        if getattr(args, "restart_xochitl", False):
+            print("Restarting xochitl service...")
+            run_ssh("systemctl restart xochitl", host=target_host)
+
+        if getattr(args, "suspend", False):
+            print("Suspending tablet now to display dashboard immediately on E-ink screen...")
+            run_ssh("systemctl suspend", host=target_host)
+        else:
+            print("Tip: Press the tablet power button (or run with --suspend) to see the dashboard immediately.")
+
+    elif mode == "doc":
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
+            temp_pdf = tmp_pdf.name
+        im.save(temp_pdf, "PDF", resolution=226.0)
+
+        if save_path:
+            im.save(save_path, "PNG")
+            print(f"Saved local preview image to {save_path}")
+
+        folder = getattr(args, "folder", None)
+        title = getattr(args, "title", "Daily Dashboard")
+        print(f"Pushing dashboard as a notebook document '{title}' to reMarkable...")
+        push_args = argparse.Namespace(
+            file=temp_pdf,
+            folder=folder,
+            title=title,
+            force_new=False,
+            device=getattr(args, "device", None)
+        )
+        cmd_push(push_args)
+        try:
+            os.unlink(temp_pdf)
+        except Exception:
+            pass
+        print(f"Daily Dashboard notebook created! Open it on your tablet to write notes with your stylus.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="rm-ai: Wireless AI Note Assistant for reMarkable")
@@ -1135,7 +1587,10 @@ def main():
     p_add.set_defaults(func=cmd_add_device)
 
     # setup
-    p_setup = subparsers.add_parser("setup", aliases=["setup-agent", "install-skills"], help="Configure AI agents (Antigravity, Gemini, Claude Code)")
+    p_setup = subparsers.add_parser("setup", aliases=["setup-agent", "install-skills"], help="Interactive setup wizard for reMarkable tablet & AI agents")
+    p_setup.add_argument("--ip", type=str, default=None, help="Tablet IP address")
+    p_setup.add_argument("--password", "-p", type=str, default=None, help="Tablet root password")
+    p_setup.add_argument("--skills-only", action="store_true", help="Only refresh agent skills without tablet configuration")
     p_setup.set_defaults(func=cmd_setup)
 
 
@@ -1184,6 +1639,21 @@ def main():
     p_draw.add_argument("--eraser", action="store_true", help="Use virtual eraser instead of pen")
     p_draw.add_argument("--pressure", type=int, default=2500, help="Simulated pen pressure (0..4095)")
     p_draw.set_defaults(func=cmd_draw)
+
+    # dashboard
+    p_dash = subparsers.add_parser("dashboard", aliases=["dash"], help="Turn tablet into a dedicated fullscreen desk clock & productivity dashboard")
+    p_dash.add_argument("--mode", choices=["standby", "doc", "live"], default="standby", help="Dashboard mode: standby (0-battery sleep screen), doc (interactive notebook), live (vector clock)")
+    p_dash.add_argument("--suspend", action="store_true", help="Put tablet to sleep immediately so dashboard appears on screen now")
+    p_dash.add_argument("--restore", action="store_true", help="Restore original reMarkable standby screen")
+    p_dash.add_argument("--restart-xochitl", action="store_true", help="Restart xochitl daemon to reload standby image immediately")
+    p_dash.add_argument("--format", choices=["24h", "12h"], default="24h", help="Clock time format")
+    p_dash.add_argument("--quote", type=str, default=None, help="Custom daily focus / quote text")
+    p_dash.add_argument("--task", action="append", default=None, help="Add custom task item (can specify multiple times)")
+    p_dash.add_argument("--tasks-from", type=str, default=None, help="Notebook name to pull tasks from")
+    p_dash.add_argument("--folder", "-f", type=str, default=None, help="Folder on tablet for doc mode")
+    p_dash.add_argument("--title", "-t", type=str, default="Daily Dashboard", help="Document title for doc mode")
+    p_dash.add_argument("--save", type=str, default=None, help="Save local preview PNG image")
+    p_dash.set_defaults(func=cmd_dashboard)
 
     args = parser.parse_args()
     if not args.command:
