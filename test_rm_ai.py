@@ -159,7 +159,7 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         assert 1 <= sum(1 for t, c, v in evs if t == rm_ai.EV_KEY and c == rm_ai.BTN_TOOL_PEN and v == 1) <= 3
         first_y = next(v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y)
         assert abs(first_y * 1404 / 15725 - rm_ai.GLYPH_BASE[0]) < 120
-        assert len(rm_ai.glyph_centerlines(":", 190)) == 2 and 1 <= len(rm_ai.glyph_centerlines("8", 110)) <= 3
+        assert all(c in rm_ai.STROKE_FONT for chars in rm_ai.GLYPH_SETS.values() for c in chars)
         rm_ai.render_dash_pages(out, "Burnaby", None, days=2)
         assert len(list((out / "pages").glob("*.jpg"))) == 3
     assert rm_ai.usage_file_text({"windows": [("Session", 12.4, "2026-09-08T21:59:59+00:00")]}).count("\n") == 5

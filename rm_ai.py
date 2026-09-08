@@ -1623,8 +1623,8 @@ LIVE_CLOCK_ZONE = (66, 100, 800, 320)     # swept clean before each redraw of th
 TABLET_DASH_DIR = "/home/root/.local/share/rmdash"
 GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmdash shifts it into place
 # What the tablet-resident dashboard draws with the pen (display px): the time and the three usage rows,
-# as the live page does, in single-line glyphs of the page font (glyph_centerlines) that a thick pen such
-# as the Marker turns into bold digits in one or two strokes. Date, calendar and the weather block are
+# as the live page does, in single-stroke glyphs (STROKE_FONT) that a thick pen such as the Marker turns
+# into bold digits in one or two strokes. Date, calendar and the weather block are
 # printed: the installer leaves JPEG templates for the coming days and the tablet composes each day's
 # page itself (app/rmdash.c compose_page, weather in the sleep screen's format). The one source
 # app/rmdash.c reads as `layout`; zones are erased whole when a value in them changes; texts are
@@ -1650,139 +1650,74 @@ def render_dash_pages(out, city_name, tasks, days=DASH_STOCK_DAYS):
         page.convert("L").save(out / "pages" / f"{day.strftime('%Y-%m-%d')}.jpg", "JPEG", quality=85)
 
 
-def glyph_centerlines(ch, size, bold=True):
-    """Single-line version of a glyph of the dashboard font: the glyph is rendered, thinned to its
-    centreline (Zhang-Suen) and traced into polylines, in px relative to the text origin like
-    text_strokes(). A thick pen along these lines gives a bold digit in one or two strokes."""
-    from PIL import Image, ImageDraw
-    ref = 120                                     # thinned once at this size, scaled to `size`
-    font = get_font(ref, bold=bold)
-    left, top, right, bottom = font.getbbox(ch)
-    pad = 2
-    w, h = right + 2 * pad, bottom + 2 * pad
-    img = Image.new("L", (w, h), 255)
-    ImageDraw.Draw(img).text((pad, pad), ch, font=font, fill=0)
-    px = img.load()
-    on = [[1 if px[x, y] < 128 else 0 for x in range(w)] for y in range(h)]
+# A single-stroke font for the pen: each glyph is one to three polylines/arcs on a 100-unit em (cap
+# height 72, y down), drawn along its centreline; the pen's own width gives it body (the Marker makes
+# it bold). Glyphs keep the page font's advance widths so the layout is the one the printed page has.
+def _arc(cx, cy, rx, ry, t0, t1, n=None):
+    n = n or max(6, int(abs(t1 - t0) / 15))
+    return [(cx + rx * math.cos(math.radians(t0 + (t1 - t0) * i / n)), cy + ry * math.sin(math.radians(t0 + (t1 - t0) * i / n))) for i in range(n + 1)]
 
-    def nb(x, y):   # P2..P9 clockwise from north
-        return [on[y - 1][x], on[y - 1][x + 1], on[y][x + 1], on[y + 1][x + 1], on[y + 1][x], on[y + 1][x - 1], on[y][x - 1], on[y - 1][x - 1]]
+STROKE_FONT = {   # glyph: (width, strokes)
+    "0": (54, [_arc(27, 36, 22, 35, 270, 630)]),
+    "1": (54, [[(10, 16), (27, 0), (27, 72)], [(12, 72), (42, 72)]]),
+    "2": (54, [_arc(27, 21, 21, 21, 200, 380) + [(4, 72), (50, 72)]]),
+    "3": (54, [_arc(27, 19, 19, 19, 200, 450) + _arc(26, 52, 20, 20, 275, 530)]),
+    "4": (54, [[(38, 0), (2, 52), (54, 52)], [(38, 0), (38, 72)]]),
+    "5": (54, [[(48, 0), (10, 0), (6, 34)] + _arc(28, 50, 22, 22, 250, 520)]),
+    "6": (54, [[(46, 0), (32, 5), (17, 20), (9, 38), (6, 50)] + _arc(27, 51, 21, 21, 180, 540)]),
+    "7": (54, [[(4, 0), (50, 0), (22, 72)]]),
+    "8": (54, [_arc(27, 19, 17, 17, 90, 450) + _arc(27, 52, 20, 20, 270, -90)]),
+    "9": (54, [_arc(27, 22, 21, 21, 0, 360) + [(48, 22), (46, 42), (38, 58), (26, 68), (10, 72)]]),
+    ":": (24, [_arc(12, 26, 2, 2, 0, 360), _arc(12, 62, 2, 2, 0, 360)]),   # dots: a tiny circle the pen fills
+    ".": (24, [_arc(12, 70, 2, 2, 0, 360)]),
+    ",": (24, [[(13, 66), (9, 78)]]),
+    "-": (40, [[(6, 40), (34, 40)]]),
+    "/": (40, [[(36, 0), (4, 72)]]),
+    "%": (70, [_arc(13, 12, 11, 11, 0, 360), [(58, 0), (12, 72)], _arc(57, 60, 11, 11, 0, 360)]),
+    "\u00b0": (30, [_arc(15, 10, 9, 9, 0, 360)]),
+    "A": (54, [[(2, 72), (27, 0), (52, 72)], [(11, 48), (43, 48)]]),
+    "B": (50, [[(4, 72), (4, 0), (26, 0)] + _arc(26, 18, 18, 18, 270, 450) + [(4, 36), (26, 36)] + _arc(26, 54, 18, 18, 270, 450) + [(4, 72)]]),
+    "C": (54, [_arc(30, 36, 26, 36, 325, 35)]),
+    "D": (54, [[(4, 0), (4, 72), (22, 72)] + _arc(22, 36, 26, 36, 90, -90) + [(4, 0)]]),
+    "E": (46, [[(44, 0), (4, 0), (4, 72), (44, 72)], [(4, 36), (36, 36)]]),
+    "F": (44, [[(44, 0), (4, 0), (4, 72)], [(4, 36), (34, 36)]]),
+    "G": (56, [_arc(30, 36, 26, 36, 325, 10) + [(56, 40), (32, 40)]]),
+    "H": (52, [[(4, 0), (4, 72)], [(48, 0), (48, 72)], [(4, 36), (48, 36)]]),
+    "I": (20, [[(10, 0), (10, 72)]]),
+    "J": (36, [[(30, 0), (30, 52)] + _arc(18, 52, 12, 20, 0, 180)]),
+    "K": (50, [[(4, 0), (4, 72)], [(46, 0), (4, 44)], [(17, 32), (48, 72)]]),
+    "L": (44, [[(4, 0), (4, 72), (44, 72)]]),
+    "M": (60, [[(4, 72), (4, 0), (30, 50), (56, 0), (56, 72)]]),
+    "N": (52, [[(4, 72), (4, 0), (48, 72), (48, 0)]]),
+    "O": (56, [_arc(28, 36, 24, 36, 270, 630)]),
+    "P": (48, [[(4, 72), (4, 0), (26, 0)] + _arc(26, 20, 20, 20, 270, 450) + [(4, 40)]]),
+    "Q": (56, [_arc(28, 36, 24, 36, 270, 630), [(32, 52), (54, 76)]]),
+    "R": (50, [[(4, 72), (4, 0), (26, 0)] + _arc(26, 20, 20, 20, 270, 450) + [(4, 40)], [(26, 40), (48, 72)]]),
+    "S": (50, [_arc(26, 18, 18, 18, 340, 90) + _arc(26, 54, 18, 18, 270, 520)]),
+    "T": (50, [[(2, 0), (48, 0)], [(25, 0), (25, 72)]]),
+    "U": (52, [[(4, 0), (4, 50)] + _arc(26, 50, 22, 22, 180, 0) + [(48, 0)]]),
+    "V": (54, [[(2, 0), (27, 72), (52, 0)]]),
+    "W": (70, [[(2, 0), (18, 72), (35, 14), (52, 72), (68, 0)]]),
+    "X": (52, [[(4, 0), (48, 72)], [(48, 0), (4, 72)]]),
+    "Y": (52, [[(2, 0), (26, 38), (50, 0)], [(26, 38), (26, 72)]]),
+    "Z": (50, [[(4, 0), (46, 0), (4, 72), (46, 72)]]),
+}
 
-    changed = True
-    while changed:
-        changed = False
-        for step in (0, 1):
-            kill = []
-            for y in range(1, h - 1):
-                for x in range(1, w - 1):
-                    if not on[y][x]:
-                        continue
-                    p = nb(x, y)
-                    b = sum(p)
-                    if b < 2 or b > 6:
-                        continue
-                    a = sum(1 for i in range(8) if p[i] == 0 and p[(i + 1) % 8] == 1)
-                    if a != 1:
-                        continue
-                    if step == 0 and (p[0] * p[2] * p[4] or p[2] * p[4] * p[6]):
-                        continue
-                    if step == 1 and (p[0] * p[2] * p[6] or p[0] * p[4] * p[6]):
-                        continue
-                    kill.append((x, y))
-            for x, y in kill:
-                on[y][x] = 0
-            changed = changed or bool(kill)
 
-    pts = {(x, y) for y in range(1, h - 1) for x in range(1, w - 1) if on[y][x]}
-    def adj(p):
-        x, y = p
-        return [(x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx or dy) and (x + dx, y + dy) in pts]
-    def crossings(p):   # 0->1 transitions around the pixel: 1 endpoint, 2 path, 3+ junction
-        x, y = p
-        ring = [(x, y - 1), (x + 1, y - 1), (x + 1, y), (x + 1, y + 1), (x, y + 1), (x - 1, y + 1), (x - 1, y), (x - 1, y - 1)]
-        v = [1 if q in pts else 0 for q in ring]
-        return sum(1 for i in range(8) if v[i] == 0 and v[(i + 1) % 8] == 1)
-    nodes = {p for p in pts if crossings(p) != 2}
-    visited = set()
-    paths = []
-    def walk(start, nxt):
-        path = [start, nxt]
-        visited.add(nxt)
-        while nxt not in nodes:
-            cand = [q for q in adj(nxt) if q not in visited and q not in path[-3:]]
-            if not cand:
-                break
-            cand.sort(key=lambda q: abs(q[0] - nxt[0]) + abs(q[1] - nxt[1]))   # 4-neighbours first
-            nxt = cand[0]; visited.add(nxt); path.append(nxt)
-        return path
-    for n in sorted(nodes):
-        visited.add(n)
-        for q in adj(n):
-            if q in visited and q not in nodes:
-                continue
-            if q not in visited or (q in nodes and (q, n) not in {(p[-1], p[0]) for p in paths}):
-                paths.append(walk(n, q))
-    for p in sorted(pts - visited):   # closed loops without any junction, e.g. "0"
-        if p in visited:
-            continue
-        path = [p]; visited.add(p); cur = p
-        while True:
-            cand = [q for q in adj(cur) if q not in visited]
-            if not cand:
-                break
-            cand.sort(key=lambda q: abs(q[0] - cur[0]) + abs(q[1] - cur[1]))
-            cur = cand[0]; visited.add(cur); path.append(cur)
-        if len(path) > 2:
-            paths.append(path + [path[0]])
-    for p in sorted(pts):   # dots (".", ":") thin down to single pixels: a stroke of no length
-        if not adj(p):
-            paths.append([p, (p[0] + 1, p[1])])
-    # spurs: short branches from a junction to a loose end, left by thinning at corners; then join
-    # paths that meet end to end so a glyph is as few strokes as possible
-    endpoints = {p for p in pts if crossings(p) == 1}
-    junctions = {p for p in pts if crossings(p) >= 3}
-    def spur(p):
-        return len(p) < ref * 0.12 and ((p[0] in endpoints and p[-1] in junctions) or (p[-1] in endpoints and p[0] in junctions))
-    paths = [p for p in paths if len(p) >= 2 and not spur(p)]
-    merged = True
-    while merged:
-        merged = False
-        for i in range(len(paths)):
-            for j in range(len(paths)):
-                if i == j or paths[i][0] == paths[i][-1]:
-                    continue
-                a_, b_ = paths[i], paths[j]
-                if a_[-1] == b_[0]:
-                    paths[i] = a_ + b_[1:]; del paths[j]; merged = True; break
-                if a_[-1] == b_[-1]:
-                    paths[i] = a_ + b_[-2::-1]; del paths[j]; merged = True; break
-                if a_[0] == b_[-1]:
-                    paths[i] = b_ + a_[1:]; del paths[j]; merged = True; break
-            if merged:
-                break
-    def simplify(path, tol=1.2):
-        if len(path) < 3:
-            return path
-        if path[0] == path[-1]:   # a loop: split at the point farthest from the start, simplify both halves
-            m = max(range(1, len(path) - 1), key=lambda i: (path[i][0] - path[0][0]) ** 2 + (path[i][1] - path[0][1]) ** 2)
-            return simplify(path[:m + 1], tol) + simplify(path[m:], tol)[1:]
-        (x0, y0), (x1, y1) = path[0], path[-1]
-        dmax, idx = 0, 0
-        for i in range(1, len(path) - 1):
-            x, y = path[i]
-            d = abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / (math.hypot(x1 - x0, y1 - y0) or 1)
-            if d > dmax:
-                dmax, idx = d, i
-        if dmax > tol:
-            return simplify(path[:idx + 1], tol)[:-1] + simplify(path[idx:], tol)
-        return [path[0], path[-1]]
-    k = size / ref
-    return [[((x - pad) * k, (y - pad) * k) for x, y in simplify(p)] for p in paths]
+def stroke_glyph(ch, size, advance):
+    """The strokes of `ch` at `size` px, in px relative to the text origin the way text_strokes()
+    places glyphs (the cap top sits 0.2 em below the origin, as in the page font), centred in `advance`."""
+    if ch not in STROKE_FONT:
+        return []
+    width, strokes = STROKE_FONT[ch]
+    k = size / 100
+    left = (advance - width * k) / 2
+    return [[(left + x * k, 0.2 * size + y * k) for x, y in stroke] for stroke in strokes]
 
 
 def bake_dash_app(out):
-    """Bake glyphs (one file per glyph and size, single-line), zone sweeps and the usage bars for
-    app/rmdash.c, plus the `layout` and `glyphs` tables it reads."""
+    """Bake glyphs (one file per glyph and size, STROKE_FONT single strokes), zone sweeps and the usage
+    bars for app/rmdash.c, plus the `layout` and `glyphs` tables it reads."""
     rec = StrokeRecorder()
     gx, gy = GLYPH_BASE
     lines = []
@@ -1792,7 +1727,7 @@ def bake_dash_app(out):
             lines.append(f"{size} {ord(ch)} {font.getlength(ch):.2f}")
             if ch == " ":
                 continue
-            for path in glyph_centerlines(ch, size):
+            for path in stroke_glyph(ch, size, font.getlength(ch)):
                 rec.stroke([(gx + x, gy + y) for x, y in path], pressure=4000)
             (out / f"g{size}_{ord(ch)}.bin").write_bytes(rec.take())
     (out / "glyphs").write_text("\n".join(lines) + "\n")

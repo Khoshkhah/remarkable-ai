@@ -147,9 +147,10 @@ PC's full page. The pen strokes live in the `.rm` and survive the swap; the PC's
 template stock up (`top_up_dash_pages`, no reload). `TABLET_DASH_LAYOUT` is the single source of the
 pen-owned zones (clock and the three usage rows, erased whole when a value in them changes), text
 origins and bars, written to the tablet as `layout`; rmdash draws only zones whose sweep file exists.
-Glyphs are single-line: `glyph_centerlines()` thins the page font's glyph (Zhang-Suen) and traces the
-skeleton into one to three polylines per glyph, so a thick pen (the Marker) draws a bold digit in a
-second; `bake_dash_app()` records them at `GLYPH_BASE` with advance widths in `glyphs`. Data:
+Glyphs are single strokes: `STROKE_FONT` is a designed plotter-style font (lines and arcs on a 100-unit
+em, cap height 72, y down; `_arc()` angles are clockwise on screen, 90 = bottom) that `stroke_glyph()`
+centres in the page font's advance width, so a thick pen (the Marker) draws a bold digit in a second;
+`bake_dash_app()` records them at `GLYPH_BASE` with advance widths in `glyphs`. Data:
 Open-Meteo directly (also while idle, for the printed block), Claude usage either from a `token` file
 (a Claude Code login made for the tablet in another `CLAUDE_CONFIG_DIR`; the program renews it with
 `refresh_claude_token`'s request, and a login cannot be shared: renewal invalidates the other holder at
