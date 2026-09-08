@@ -958,19 +958,32 @@ class DigitalClock:
             add_digit()
             add_digit()
 
-    def run(self, duration=None, clear_on_exit=False):
+    def run(self, duration=None, clear_on_exit=False, once=False):
         print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos}", flush=True)
-        print(f"⚡ Minimum delta state machine active (only changed segments toggled per second).", flush=True)
-        print(f"💡 Make sure a notebook page is open on your tablet screen.", flush=True)
-        print(f"   Press Ctrl+C to stop.\n", flush=True)
         self.stylus.connect()
         try:
             # Draw stationary colons once
             for dots in self.colon_coords:
-                self.stylus.stroke(dots, is_eraser=False, pressure=2500)
+                self.stylus.stroke(dots, is_eraser=False, pressure=3200)
+
+            now = datetime.now()
+            time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+            total_changes = 0
+            for digit, char in zip(self.digits, time_str):
+                changes = digit.transition_to(char)
+                total_changes += changes
+            display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
+            print(f"⏰ Time drawn: [{display_str}] at {self.pos} ({self.size} size).", flush=True)
+
+            if once:
+                return
+
+            print(f"⚡ Minimum delta state machine active (only changed segments toggled per second).", flush=True)
+            print(f"💡 Make sure a notebook page is open on your tablet screen.", flush=True)
+            print(f"   Press Ctrl+C to stop.\n", flush=True)
 
             start_time = time.time()
-            last_sec = ""
+            last_sec = time_str
             while True:
                 now = datetime.now()
                 time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
@@ -1007,8 +1020,17 @@ class DigitalClock:
 
 def cmd_clock(args):
     host = get_active_host(args.device)
+    # Check if tablet is on home screen vs open notebook
+    try:
+        out = run_ssh("ls -la /proc/$(pidof xochitl)/fd/ | grep -E '\\.rm|\\.pagedata|\\.content' || true", host=host)
+        if not out.strip():
+            print("⚠️ Notice: Your reMarkable appears to be on the Home Screen (file list).", flush=True)
+            print("👉 Please tap and open any notebook or quick sheet so the drawing canvas is active!\n", flush=True)
+    except Exception:
+        pass
+
     clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size)
-    clock.run(duration=args.duration, clear_on_exit=args.clear)
+    clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once)
 
 
 def cmd_draw(args):
@@ -1088,6 +1110,7 @@ def main():
     p_clock.add_argument("--pos", "-p", type=str, default="top-right", help="Screen position: top-right, top-left, center, bottom-right, or X,Y")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
     p_clock.add_argument("--size", "-s", choices=["small", "medium", "large", "huge"], default="large", help="Digit size preset (default: large)")
+    p_clock.add_argument("--once", "-1", action="store_true", help="Draw the current time once and exit immediately (no loop)")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
     p_clock.add_argument("--clear", action="store_true", help="Erase the clock from screen on exit")
     p_clock.set_defaults(func=cmd_clock)
