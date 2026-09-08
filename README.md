@@ -167,6 +167,7 @@ rm-ai clock --pos top-right
 rm-ai clock --pos center --duration 60 --clear
 rm-ai clock --size large --thickness 24   # bold digits; the pen selected on the tablet is measured automatically (max thickness: small 12, medium 25, large 33, xlarge 45)
 rm-ai clock --pressure 4000               # press harder: widens pressure-sensitive pens like the ballpoint
+rm-ai clock --pos center --pressure 2500 --pen-width 32 --save-defaults   # make these the defaults for plain `rm-ai clock`
 
 # Live vector stroke injection
 rm-ai draw line --from 200,300 --to 800,300

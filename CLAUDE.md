@@ -99,8 +99,9 @@ derives its corner gap and erase sweep from that ink width against the fixed ~17
 so erasing one segment never nicks a neighbour (`test_rm_ai.py` asserts this); bars too thick for
 the digit size raise `ValueError`. The width of one pen line at the chosen `--pressure` is
 measured by `detect_pen_width()` from the newest page's saved strokes (every stroke records pen,
-pressure and drawn width), with `--pen-width` as the manual override. The tick loop sleeps to the
-next wall-clock second, so drawing time cannot drift or skip seconds.
+pressure and drawn width), with `--pen-width` as the manual override. `--save-defaults` stores the clock flags under
+`clock_defaults` in the config file; `cmd_clock` resolves flag > saved default > built-in. The
+tick loop sleeps to the next wall-clock second, so drawing time cannot drift or skip seconds.
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
 image locally and scp's it to `/usr/share/remarkable/suspended.png`, backing the factory image up

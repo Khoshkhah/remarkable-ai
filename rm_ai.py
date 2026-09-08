@@ -894,15 +894,25 @@ class VirtualStylus:
             return
         cmd = ["ssh"] + get_ssh_base_opts() + [self.host, "dd of=/dev/input/event1 bs=16 2>/dev/null"]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        self._lift_everything()
 
     def close(self):
         if self.proc:
             try:
+                self._lift_everything()
                 self.proc.stdin.close()
                 self.proc.wait(timeout=2)
             except Exception:
                 pass
             self.proc = None
+
+    def _lift_everything(self):
+        """Pen up, both tools out of proximity. A run killed mid-stroke leaves the digitizer with the
+        eraser 'down', and xochitl then erases everything the next run draws; the kernel drops events
+        that change nothing, so this is free when the state is already clean."""
+        self._frame((EV_ABS, ABS_PRESSURE, 0), (EV_KEY, BTN_TOUCH, 0), (EV_ABS, ABS_DISTANCE, 100),
+                    (EV_KEY, BTN_TOOL_RUBBER, 0), (EV_KEY, BTN_TOOL_PEN, 0))
+        self.tool = None
 
     @staticmethod
     def pack_event(ev_type, ev_code, ev_value):
@@ -937,6 +947,7 @@ class VirtualStylus:
             self.connect()
 
         tool = BTN_TOOL_RUBBER if is_eraser else BTN_TOOL_PEN
+        pressure = max(1, min(4095, pressure))   # the digitizer's 12-bit range
         if self.tool is not None and tool != self.tool:
             time.sleep(self.TOOL_SETTLE)
         self.tool = tool
@@ -983,34 +994,42 @@ DIGIT_SEGMENTS = {
     ' ': set(),
 }
 
-def detect_pen_width(host, pressure, fallback=12):
-    """Measure the width the tablet draws for the pen currently in use, at the given injected pressure.
+def measure_pen_width(stylus, line, pressure):
+    """Draw `line` with the pen selected on the tablet and read back the width xochitl gave it.
 
-    Every saved stroke records pen, size, and per-point pressure and width, so the newest page on the
-    tablet is a calibration record: take its most recent strokes (the pen in use), and the median width
-    of their points nearest our pressure. Returns (width_px, description)."""
+    Every saved stroke records its drawn width, so one test line is the calibration: wait for
+    xochitl's autosave of the open page (irregular, 10-60 s), parse that page file, take its last
+    stroke. Returns (width_px, note), or (None, reason) when no new pen stroke appeared, which
+    means the tablet is not drawing: no page open, or an eraser/selection tool active."""
     import io
+    host = stylus.host
     try:
         from rmscene import read_blocks, SceneLineItemBlock
-        newest = run_ssh(f"ls -t $(find {REMOTE_PATH} -name '*.rm' -size +1k) 2>/dev/null | head -n 6", host=host).split()
-        strokes = []
-        for path in newest:   # a recently cleared page holds only tombstones; take the newest with ink
-            raw = subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"cat {path}"], capture_output=True).stdout
-            strokes = [b.item.value for b in read_blocks(io.BytesIO(raw))
-                       if isinstance(b, SceneLineItemBlock) and b.item.value is not None and getattr(b.item.value, "points", None)]
-            if strokes:
-                break
-        if not strokes:
-            return fallback, "no strokes found on the tablet's recent pages"
-        recent = strokes[-20:]
-        pen = max({(str(v.tool), v.thickness_scale) for v in recent}, key=lambda k: sum(1 for v in recent if (str(v.tool), v.thickness_scale) == k))
-        pts = [pt for v in strokes if (str(v.tool), v.thickness_scale) == pen for pt in v.points]
-        target = pressure * 255 / 4095
-        near = sorted(pts, key=lambda pt: abs(pt.pressure - target))[:max(20, len(pts) // 10)]
-        width = sorted(pt.width for pt in near)[len(near) // 2]
-        return width, f"{pen[0].split('.')[-1]} (size scale {pen[1]:g}) draws {width}px at pressure {pressure}"
-    except Exception as e:
-        return fallback, f"could not read pen width ({e}); assuming {fallback}px"
+    except ImportError:
+        return None, "rmscene is not installed so the pen cannot be measured; pass --pen-width"
+    t0 = int(run_ssh("date +%s", host=host))
+    stylus.stroke(line, pressure=pressure)
+    saw_save = False
+    for _ in range(25):
+        time.sleep(3)
+        print(".", end="", flush=True)
+        saved = run_ssh(f"find {REMOTE_PATH} -name '*.rm' -mmin -3 -exec stat -c '%Y %n' {{}} \\;", host=host).split("\n")
+        fresh = [l.split(" ", 1)[1] for l in saved if l.strip() and int(l.split(" ", 1)[0]) >= t0]
+        if not fresh:
+            continue
+        saw_save = True
+        raw = subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"cat {fresh[0]}"], capture_output=True).stdout
+        strokes = [b.item.value for b in read_blocks(io.BytesIO(raw))
+                   if isinstance(b, SceneLineItemBlock) and b.item.value is not None and getattr(b.item.value, "points", None)]
+        if strokes:
+            print()
+            last = strokes[-1]
+            width = sorted(pt.width for pt in last.points)[len(last.points) // 2]
+            return width, f"{str(last.tool).split('.')[-1]} draws {width}px at pressure {pressure}"
+    print()
+    if saw_save:
+        return None, "the tablet saved the page but the test line is not in it: an eraser or selection tool is active, select a pen in the toolbar"
+    return None, "the tablet did not draw or save the test line within 75 s: open a notebook page and select a pen, or pass --pen-width"
 
 
 class SevenSegmentDigit:
@@ -1033,20 +1052,23 @@ class SevenSegmentDigit:
         self.current_char = None
         self.pressure = 2500
         thickness = max(thickness, pen)                             # one line is the thinnest bar
-        ink_r = thickness / 2
+        ink_r, pen_r = thickness / 2, pen / 2
         # draw: overlapping passes (half a line apart) whose ink spans the wanted thickness
         d_spread = (thickness - pen) / 2
         n_d = 1 + math.ceil(d_spread / (pen / 4)) if d_spread else 1
         self.draw_offsets = [-d_spread + 2 * d_spread * i / (n_d - 1) for i in range(n_d)] if n_d > 1 else [0]
-        # erase: enough passes to cover the ink with margin, overrunning the bar ends
+        # erase: enough passes to cover the ink sideways with margin, overrunning the bar ends by
+        # enough to take the pen's round caps
         spread = max(0.0, ink_r + self.MARGIN - self.ERASER_R)
         n = 2 + int(2 * spread / self.ERASER_R)
         offsets = [-spread + 2 * spread * i / (n - 1) for i in range(n)]
-        ext = max(self.ERASE_EXTEND, spread)
-        self.gap = math.ceil(ink_r + self.ERASER_R + ext)
+        ext = max(self.ERASE_EXTEND, pen_r + self.MARGIN - self.ERASER_R)
+        # corner gap: the erase footprint (sideways spread + eraser radius, or end overrun + eraser
+        # radius) must stop short of the neighbouring bar's ink (pen radius, or half the thickness)
+        self.gap = math.ceil(max(spread + self.ERASER_R + pen_r, ext + self.ERASER_R + ink_r))
         if min(width, height // 2) - 2 * self.gap < 8:
-            raise ValueError(f"{thickness}px bars need {self.gap}px corner gaps, too much for a "
-                             f"{width}x{height} digit; use a bigger --size or a smaller --thickness")
+            raise ValueError(f"{thickness}px bars ({pen}px pen line) need {self.gap}px corner gaps, too much for a "
+                             f"{width}x{height} digit; use a bigger --size, a thinner pen, lower --pressure or smaller --thickness")
         self.draw_coords = self._segments(self.draw_offsets, 0)
         self.erase_coords = self._segments(offsets, ext)
 
@@ -1107,23 +1129,18 @@ class DigitalClock:
     EDGE = 130   # corner presets keep this far from the screen edges: xochitl's toolbar column on the
                  # left and the notebook menu at the top-right are ~105px, and a stroke landing on them
                  # opens menus or switches tools instead of drawing
-    SIZE_PRESETS = {
-        "small":  {"w": 50,  "h": 90,  "digit_gap": 24, "colon_gap": 48},
-        "medium": {"w": 75,  "h": 140, "digit_gap": 36, "colon_gap": 68},
-        "large":  {"w": 95,  "h": 175, "digit_gap": 46, "colon_gap": 85},
-        "xlarge": {"w": 120, "h": 220, "digit_gap": 56, "colon_gap": 100},
+    SIZE_PRESETS = {   # gaps grow further with the bar thickness, see __init__
+        "small":  {"w": 50,  "h": 90,  "digit_gap": 30, "colon_gap": 60},
+        "medium": {"w": 75,  "h": 140, "digit_gap": 46, "colon_gap": 100},
+        "large":  {"w": 95,  "h": 175, "digit_gap": 60, "colon_gap": 128},
+        "xlarge": {"w": 120, "h": 220, "digit_gap": 60, "colon_gap": 110},
     }
 
     def __init__(self, host=None, pos="top-right", format="HH:MM:SS", size=None, thickness=12, pressure=2500, pen_width=None):
         self.stylus = VirtualStylus(host=host)
         self.pos = pos
         self.format = format
-        self.pressure = pressure
-        if pen_width is None:
-            pen_width, note = detect_pen_width(self.stylus.host, pressure)
-            print(f"🖊️  {note}")
-        self.pen_width = pen_width
-        self.thickness = max(thickness, pen_width)
+        self.pressure = max(1, min(4095, pressure))   # the digitizer's 12-bit range
 
         # Auto size: center defaults to large, corner defaults to medium
         if not size:
@@ -1134,24 +1151,65 @@ class DigitalClock:
         self.digit_gap = cfg["digit_gap"]
         self.colon_gap = cfg["colon_gap"]
 
+        if pen_width is None:
+            pen_width = self._measure_pen()
+        self.pen_width = pen_width
+        if thickness == "max":   # thickest bars that stay readable: at least MIN_BAR_RATIO times longer than thick
+            thickness = next((t for t in range(80, pen_width, -1) if self._bar_length(t, pen_width) >= self.MIN_BAR_RATIO * t), pen_width)
+        self.thickness = max(thickness, pen_width)
+        self.digit_gap += self.thickness // 2       # thick bars need more air between digits
+        self.colon_gap += self.thickness            # and the colon dots grow with the thickness
+
         self.digits = []
         self.colons = []          # (cx, cy) of each colon dot
         self._init_layout()
+        bar = min(self.w, self.h // 2) - 2 * self.digits[0].gap
+        if bar < self.thickness:
+            print(f"⚠️  {self.thickness}px-thick bars on {self.w}x{self.h} digits are only {bar}px long; "
+                  f"use --size xlarge, a thinner pen or lower --pressure for readable digits")
+
+    MIN_BAR_RATIO = 1.5   # bar length / thickness that --thickness max keeps, so segments stay bars not blobs
+
+    def _bar_length(self, thickness, pen_width):
+        """Length of the shortest bar for this thickness, or -1 if it does not fit the digit at all."""
+        try:
+            d = SevenSegmentDigit(None, 0, 0, self.w, self.h, thickness, pen_width)
+            return min(self.w, self.h // 2) - 2 * d.gap
+        except ValueError:
+            return -1
 
     @staticmethod
-    def _square(cx, cy, r):
-        return [(cx - r, cy - r), (cx + r, cy - r), (cx + r, cy + r), (cx - r, cy + r), (cx - r, cy - r)]
+    def _dot(cx, cy, diameter, line):
+        """Spiral that a pen `line` px wide fills into a solid disc about `diameter` px across."""
+        pts = []
+        r = max(0.0, (diameter - line) / 2)
+        while r > 0:
+            pts += [(cx + r * math.cos(2 * math.pi * i / 12), cy + r * math.sin(2 * math.pi * i / 12)) for i in range(12)]
+            r -= line / 2
+        return pts + [(cx, cy)]
 
-    def _init_layout(self):
+    def _measure_pen(self):
+        """Width of one line of the selected pen at our pressure, measured with a test line drawn
+        along the first digit's middle segment (erased again at start-up). Not cached: the tablet
+        only records the selected pen in a notebook's files when the notebook is closed, so there is
+        no reliable key to cache under; pass --pen-width to skip the 10-20 s wait."""
+        print("📏 Measuring the selected pen: drawing a test line and waiting for the tablet to save it (10-60 s)...", flush=True)
+        x, y, _ = self._origin()
+        line = [(x + self.w // 4, y + self.h // 2), (x + 3 * self.w // 4, y + self.h // 2)]
+        width, note = measure_pen_width(self.stylus, line, self.pressure)
+        if width is None:
+            self.stylus.close()
+            raise ValueError(note)
+        print(f"🖊️  {note}")
+        return width
+
+    def _origin(self):
+        """Top-left of the first digit and the total width of the clock for the current position."""
         w, h = self.w, self.h
-        digit_gap = self.digit_gap
-        colon_gap = self.colon_gap
-
         is_seconds_only = (self.format == "MM:SS")
         num_digits = 4 if is_seconds_only else 6
         num_colons = 1 if is_seconds_only else 2
-        total_w = num_digits * w + (num_digits - num_colons - 1) * digit_gap + num_colons * colon_gap
-
+        total_w = num_digits * w + (num_digits - num_colons - 1) * self.digit_gap + num_colons * self.colon_gap
         e = self.EDGE
         if self.pos == "top-right":
             start_x, start_y = 1404 - total_w - e, e
@@ -1166,6 +1224,14 @@ class DigitalClock:
             start_x, start_y = int(parts[0].strip()), int(parts[1].strip())
         else:
             start_x, start_y = (1404 - total_w) // 2, (1872 - h) // 2
+        return start_x, start_y, total_w
+
+    def _init_layout(self):
+        w, h = self.w, self.h
+        digit_gap = self.digit_gap
+        colon_gap = self.colon_gap
+        is_seconds_only = (self.format == "MM:SS")
+        start_x, start_y, total_w = self._origin()
 
         curr_x = start_x
         self.digits = []
@@ -1213,9 +1279,9 @@ class DigitalClock:
             for d in self.digits:
                 d.clear()
 
-            # 2. Draw the stationary colons once: a filled square outline a bit bigger than the bar thickness
+            # 2. Draw the stationary colons once: filled discs as wide as the bars are thick
             for cx, cy in self.colons:
-                self.stylus.stroke(self._square(cx, cy, max(5, self.thickness // 2)), pressure=self.pressure)
+                self.stylus.stroke(self._dot(cx, cy, self.thickness, self.pen_width), pressure=self.pressure)
 
             # 3. Determine starting time
             now = datetime.now()
@@ -1279,16 +1345,33 @@ class DigitalClock:
                 for d in self.digits:
                     d.clear()
                 for cx, cy in self.colons:
-                    self.stylus.stroke(self._square(cx, cy, max(5, self.thickness // 2) + self.pen_width // 2 + 3), is_eraser=True, pressure=4000)
+                    self.stylus.stroke(self._dot(cx, cy, self.thickness + self.pen_width + 6, 2 * SevenSegmentDigit.ERASER_R), is_eraser=True, pressure=4000)
             self.stylus.close()
             print("Virtual stylus disconnected.", flush=True)
 
 
 def cmd_clock(args):
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))   # so the stylus is closed (pen lifted) when killed
+    cfg = load_config()
+    saved = cfg.get("clock_defaults", {})
+    # flag given on the command line > saved default > built-in default
+    opts = {k: getattr(args, k) if getattr(args, k) is not None else saved.get(k)
+            for k in ("pos", "size", "thickness", "pressure", "pen_width")}
+    opts["pos"] = opts["pos"] or "top-right"
+    opts["thickness"] = opts["thickness"] or 12
+    opts["pressure"] = opts["pressure"] or 2500
+    if opts["pen_width"] == 0:          # --pen-width 0: measure even if a default width is saved
+        opts["pen_width"] = None
+    if args.save_defaults:
+        cfg["clock_defaults"] = {k: v for k, v in opts.items() if v is not None}
+        save_config(cfg)
+        print(f"💾 Saved as defaults for 'rm-ai clock': {cfg['clock_defaults']}")
+        return
     host = get_active_host(args.device)
     try:
-        clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size,
-                             thickness=args.thickness, pressure=args.pressure, pen_width=args.pen_width)
+        clock = DigitalClock(host=host, pos=opts["pos"], format=args.format, size=opts["size"],
+                             thickness=opts["thickness"], pressure=opts["pressure"], pen_width=opts["pen_width"])
     except ValueError as e:
         print(f"❌ {e}")
         return
@@ -1689,12 +1772,13 @@ def main():
 
     # clock
     p_clock = subparsers.add_parser("clock", help="Real-time 7-segment digital clock via Virtual Stylus with minimal delta updates")
-    p_clock.add_argument("--pos", "-p", type=str, default="top-right", help="Screen position: top-right, top-left, center, bottom-right (presets stay clear of the toolbar and menus), or a raw X,Y")
+    p_clock.add_argument("--pos", "-p", type=str, default=None, help="Screen position: top-right (default), top-left, center, bottom-right (presets stay clear of the toolbar and menus), or a raw X,Y")
     p_clock.add_argument("--size", "-s", type=str, default=None, choices=["small", "medium", "large", "xlarge"], help="Clock size preset")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
-    p_clock.add_argument("--thickness", "-t", type=int, default=12, help="Bar thickness in px; thicker than one pen line is built from overlapping passes (max per size: small 12, medium 25, large 33, xlarge 45)")
-    p_clock.add_argument("--pressure", type=int, default=2500, help="Simulated pen pressure 0..4095 for drawing; widens pressure-sensitive pens such as the ballpoint")
-    p_clock.add_argument("--pen-width", type=int, default=None, help="Width in px of one line of the selected pen at that pressure; by default measured from the newest page on the tablet")
+    p_clock.add_argument("--thickness", "-t", type=lambda v: v if v == "max" else int(v), default=None, help="Bar thickness in px (default 12) or 'max' for the thickest the size allows; thicker than one pen line is built from overlapping passes (max per size: small 12, medium 25, large 33, xlarge 45)")
+    p_clock.add_argument("--pressure", type=int, default=None, help="Simulated pen pressure 0..4095 (default 2500); widens pressure-sensitive pens such as the ballpoint")
+    p_clock.add_argument("--pen-width", type=int, default=None, help="Width in px of one line of the selected pen at that pressure; by default measured with a test line at start (0 forces measuring even when a default is saved)")
+    p_clock.add_argument("--save-defaults", action="store_true", help="Store the given --pos/--size/--thickness/--pressure/--pen-width as the defaults for future runs, then exit")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
     p_clock.add_argument("--interval", "-i", type=float, default=1.0, help="Update interval in seconds (e.g. 5 for slow test)")
     p_clock.add_argument("--slow", type=float, default=None, help="Slow-motion test delay in seconds: wait N seconds per 1-second increment (e.g. --slow 5)")
