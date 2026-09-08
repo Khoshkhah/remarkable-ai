@@ -116,8 +116,9 @@ tick loop sleeps to the next wall-clock second, so drawing time cannot drift or 
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
 image locally. `--mode standby` scp's it to `/usr/share/remarkable/suspended.png`, backing the factory
-image up to `suspended.png.original` once (`--restore` reads that); the tablet reads it only when it
-falls asleep, so a cron job keeps it current. `--mode doc` routes through the same PDF upload path as
+image up to `suspended.png.original` once (`--restore` reads that); the tablet paints it once when it
+falls asleep (Wi-Fi is off during sleep), so the image carries the date but no clock, and a cron job
+keeps the *next* sleep current. An unreachable tablet is a one-line message, not a traceback. `--mode doc` routes through the same PDF upload path as
 `push` (each push restarts xochitl). `--mode doc --live` pushes the template once (`margins=0`, so the
 page maps 1:1 to the screen), waits for the document to be opened (`wait_for_open` watches
 `lastOpened`; xochitl's restart restores the document *without* touching it, so the wait is capped),

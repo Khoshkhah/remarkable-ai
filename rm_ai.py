@@ -1703,17 +1703,14 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     draw.text((1060, 68), f"WEEK {week_num} • DAY {day_of_year}", font=f_top, fill=0)
 
     # 2. Hero Clock & Date
-    f_clock = get_font(190, bold=True)
-    if time_format == "12h":
-        time_str = now.strftime("%I:%M %p").lstrip("0")
+    if live:
+        # the live page leaves the top blank: the pen draws HH:MM there and updates it every minute
+        draw.text((80, 325), now.strftime("%A, %B %d, %Y").upper(), font=get_font(38, bold=True), fill=0)
     else:
-        time_str = now.strftime("%H:%M")
-    if not live:   # the live page leaves this blank: the pen draws HH:MM there and updates it
-        draw.text((80, 115), time_str, font=f_clock, fill=0)
-
-    f_date = get_font(38, bold=True)
-    date_str = now.strftime("%A, %B %d, %Y").upper()
-    draw.text((80, 325), date_str, font=f_date, fill=0)
+        # a sleep screen or a pushed page cannot tick, so no clock: the date takes the space instead
+        # (the footer's "Updated" stamp says when it was rendered)
+        draw.text((80, 120), now.strftime("%A").upper(), font=get_font(110, bold=True), fill=0)
+        draw.text((80, 260), now.strftime("%B %d, %Y").upper(), font=get_font(64, bold=True), fill=0)
     draw.line([(80, 395), (1324, 395)], fill=0, width=4)
 
     # 3. Vertical Divider
@@ -2135,14 +2132,20 @@ def cmd_dashboard(args):
             print(f"Saved local preview image to {save_path}")
 
         print("Uploading dashboard to tablet standby screen (/usr/share/remarkable/suspended.png)...")
-        # Ensure backup of original
-        run_ssh("test -f /usr/share/remarkable/suspended.png.original || cp /usr/share/remarkable/suspended.png /usr/share/remarkable/suspended.png.original", host=target_host)
-        # Upload
-        subprocess.run(["scp"] + get_ssh_base_opts() + [temp_png, f"{target_host}:/usr/share/remarkable/suspended.png"], check=True)
         try:
-            os.unlink(temp_png)
-        except Exception:
-            pass
+            # Ensure backup of original
+            run_ssh("test -f /usr/share/remarkable/suspended.png.original || cp /usr/share/remarkable/suspended.png /usr/share/remarkable/suspended.png.original", host=target_host)
+            # Upload
+            subprocess.run(["scp"] + get_ssh_base_opts() + [temp_png, f"{target_host}:/usr/share/remarkable/suspended.png"], check=True)
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            # a sleeping tablet has its Wi-Fi off; a scheduled run simply tries again next time
+            print(f"⚠️  Tablet unreachable (asleep or off Wi-Fi), nothing uploaded: {str(e)[:80]}")
+            return
+        finally:
+            try:
+                os.unlink(temp_png)
+            except Exception:
+                pass
 
         print("Dedicated standby dashboard installed successfully!")
         print("Whenever your tablet is asleep or in standby, this dashboard displays with 0 battery drain.")

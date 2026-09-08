@@ -183,11 +183,13 @@ rm-ai draw box --at 400,500 --size 300,200
 ## Dashboard
 
 Three ways to put a dashboard on the tablet, all rendered by the PC from the same template
-(clock, date, month calendar with today marked, weather, Claude usage, battery, priorities):
+(date, month calendar with today marked, weather, Claude usage, battery, priorities):
 
 - **Sleep screen** (`rm-ai dashboard`, the default `--mode standby`): the image becomes the tablet's
-  sleep screen. It costs no battery and never touches the running app; the tablet shows it whenever
-  it sleeps and reads the image at that moment, so keep it fresh with a scheduled job:
+  sleep screen. It costs no battery and never touches the running app. The tablet paints it once, at
+  the moment it falls asleep, and nothing on it can change until the tablet wakes and sleeps again,
+  so it carries the date and an "Updated" stamp but no clock. Keep it fresh with a scheduled job, so
+  that every new sleep shows current weather, usage and calendar:
   ```
   */15 * * * * cd ~/projects/remarkable-ai && .venv/bin/python rm_ai.py dashboard --mode standby >> ~/.config/remarkable-ai/dashboard.log 2>&1
   ```
