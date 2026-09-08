@@ -1850,7 +1850,7 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         if not (no_push and existing):
             (out / "printed").write_text(f"{datetime.now().strftime('%Y-%m-%d')} {int(time.time())}\n")   # else the tablet keeps its own
         (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\npdf={REMOTE_PATH}/{doc_uuid}.pdf\n"
-                                    f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=15\n")
+                                    f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=5\n")
         if token:
             (out / "token").write_text(token)
             os.chmod(out / "token", 0o600)
@@ -2278,12 +2278,16 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     # Claude API usage, just under the calendar (fits the 6-row months too)
     y_use = y_cal + 8
-    draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
-    if claude_usage is None:
+    if live:
+        pass   # the live pages have the usage box; the Admin API spend line is the sleep screen's
+    elif claude_usage is None:
+        draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
         draw.text((250, y_use), "spend needs ANTHROPIC_ADMIN_KEY", font=get_font(18), fill=110)
     elif "error" in claude_usage:
+        draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
         draw.text((250, y_use), f"unavailable: {claude_usage['error'][:34]}", font=get_font(18), fill=110)
     else:
+        draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
         u = claude_usage
         draw.text((250, y_use), f"{now.strftime('%b').upper()} ${u['month_usd']:.2f}  •  TODAY ${u['today_usd']:.2f}", font=get_font(20, bold=True), fill=0)
         draw.text((80, y_use + 28), f"last 30 days: {u['tokens_in'] / 1e6:.1f}M tokens in  •  {u['tokens_out'] / 1e6:.2f}M out", font=get_font(18), fill=0)
