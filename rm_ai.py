@@ -285,6 +285,75 @@ def cmd_add_device(args):
     print(f"To configure SSH, add this to ~/.ssh/config:\n")
     print(f"Host {key}\n    HostName {ip}\n    User root\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\n")
 
+def cmd_setup(args):
+    """Automatically install agent skills and slash commands for Antigravity, Gemini, and Claude."""
+    import shutil
+    print("🤖 Configuring AI Agents for reMarkable AI...\n")
+    
+    base_dir = Path(__file__).resolve().parent
+    skill_src = base_dir / ".agents" / "skills" / "remarkable-ai" / "SKILL.md"
+    if not skill_src.exists():
+        skill_src = base_dir / "skills" / "remarkable-ai" / "SKILL.md"
+        
+    claude_cmd_dir = base_dir / ".claude" / "commands"
+    
+    # 1. Antigravity / Gemini Skills
+    gemini_targets = [
+        Path.home() / ".gemini" / "config" / "skills" / "remarkable-ai"
+    ]
+    if sys.platform.startswith("linux") and os.path.exists("/mnt/c/Users"):
+        for u in Path("/mnt/c/Users").glob("*"):
+            if (u / ".gemini").exists():
+                gemini_targets.append(u / ".gemini" / "config" / "skills" / "remarkable-ai")
+
+    for target_dir in gemini_targets:
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if skill_src.exists():
+                shutil.copy2(skill_src, target_dir / "SKILL.md")
+                print(f"  [Antigravity/Gemini] Installed skill to: {target_dir / 'SKILL.md'}")
+        except Exception as e:
+            print(f"  [Antigravity/Gemini] Notice: {e}")
+
+    # 2. Claude Code Slash Commands
+    claude_targets = [
+        Path.home() / ".claude" / "commands"
+    ]
+    if sys.platform.startswith("linux") and os.path.exists("/mnt/c/Users"):
+        for u in Path("/mnt/c/Users").glob("*"):
+            if (u / ".claude").exists():
+                claude_targets.append(u / ".claude" / "commands")
+
+    if claude_cmd_dir.exists():
+        for c_target in claude_targets:
+            try:
+                c_target.mkdir(parents=True, exist_ok=True)
+                for f in claude_cmd_dir.glob("*.md"):
+                    shutil.copy2(f, c_target / f.name)
+                print(f"  [Claude Code] Installed slash commands (/rm-list, /rm-read, /rm-tasks) to: {c_target}")
+            except Exception as e:
+                print(f"  [Claude Code] Notice: {e}")
+
+    # 3. Verify tablet connectivity
+    print("\n📡 Verifying reMarkable tablet connectivity...")
+    cfg = load_config()
+    active = cfg.get("active_device", "rm2")
+    dev = cfg.get("devices", {}).get(active, {})
+    host = dev.get("host", active)
+    try:
+        res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, "echo ok"], capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"  Connected to reMarkable tablet [{active}] ({host}) wirelessly!")
+        else:
+            print(f"  Tablet [{active}] ({host}) not reachable over SSH.")
+            print("  Make sure your tablet is awake, Wi-Fi is on, and SSH keys are added.")
+            print("  To register or switch tablets, run: rm-ai devices")
+    except Exception as e:
+        print(f"  SSH check skipped ({e}).")
+
+    print("\nSetup complete! AI agents are ready to use reMarkable wirelessly.")
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="rm-ai: Wireless AI Note Assistant for reMarkable")
@@ -302,6 +371,10 @@ def main():
     p_add.add_argument("--name", type=str, default=None, help="Display name")
     p_add.add_argument("--ip", type=str, default=None, help="Wi-Fi IP address")
     p_add.set_defaults(func=cmd_add_device)
+
+    # setup
+    p_setup = subparsers.add_parser("setup", aliases=["setup-agent", "install-skills"], help="Configure AI agents (Antigravity, Gemini, Claude Code)")
+    p_setup.set_defaults(func=cmd_setup)
 
 
     # list

@@ -18,20 +18,27 @@ Connect your reMarkable tablets wirelessly to **Claude, Gemini, and ChatGPT** ov
 
 ## Quickstart Installation
 
+### Option A: One-Step Automated Setup (Recommended)
 ```bash
 # 1. Clone the repository
 git clone https://github.com/Khoshkhah/remarkable-ai.git
 cd remarkable-ai
 
-# 2. Create and activate virtual environment
+# 2. Run the automated installer (installs package, CLI, and AI agent skills)
+python install.py
+```
+
+### Option B: Manual Virtualenv Setup
+```bash
+git clone https://github.com/Khoshkhah/remarkable-ai.git
+cd remarkable-ai
+
 python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# 3. Install the package
 pip install -e .
 
-# 4. Ready to use!
-rm-ai list
+# Configure AI agents automatically:
+rm-ai setup
 ```
 
 ---
@@ -140,28 +147,51 @@ rm-ai --device rm-alt read
 
 ---
 
-## Slash Commands for Claude Code
+## AI Agents Integration Guide
 
-This repository includes pre-built Claude Code commands in `.claude/commands/`:
+The repository includes preconfigured agent integrations for Google Antigravity, Gemini, and Claude Code.
 
+### Zero Configuration (Workspace Level)
+- **Google Antigravity**: If you open this cloned repository in Antigravity IDE or run the Antigravity CLI, the workspace skill at `.agents/skills/remarkable-ai/SKILL.md` is detected automatically with zero manual steps.
+- **Claude Code**: If you run Claude Code inside this cloned repository, the slash commands at `.claude/commands/` are loaded automatically.
+
+### Automated Global Setup
+To make reMarkable agent commands and skills available across your entire computer (in any project directory):
+```bash
+rm-ai setup
+```
+This single command automatically:
+1. Installs the Antigravity / Gemini Skill to `~/.gemini/config/skills/remarkable-ai/`
+2. Installs Claude Code slash commands (`/rm-list`, `/rm-read`, `/rm-tasks`) to `~/.claude/commands/`
+3. Tests wireless SSH connectivity to your reMarkable tablet.
+
+### How to Use With Each Agent
+
+#### 1. Google Antigravity & Gemini Agents
+The agent natively runs `rm-ai` in the background and views the rendered images using its built-in multimodal vision. You can prompt naturally or use slash-style prompts:
+- "List my reMarkable notebooks."
+- "Read page 5 of 'D-Wave' and transcribe the notes."
+- "Extract my tasks from 'Project Planning'."
+- "Switch active tablet to secondary reMarkable."
+
+#### 2. Claude Code (Terminal Slash Commands)
+Inside Claude Code, you can use dedicated slash commands:
 | Slash Command | Action |
 | :--- | :--- |
-| **`/rm-list`** | Lists all notebooks with last modified dates and page counts |
-| **`/rm-read [name]`** | Pulls the page, renders handwriting, and analyzes with Claude Vision |
-| **`/rm-tasks [name]`** | Extracts all to-do items and creates an actionable checklist |
+| `/rm-list` | Lists all notebooks with last modified dates and page counts |
+| `/rm-read [name]` | Pulls the page, renders handwriting, and analyzes with Claude Vision |
+| `/rm-tasks [name]` | Extracts all to-do items and creates an actionable checklist |
+
 
 ---
 
-## Antigravity / Gemini Skill
+### 3. Standalone CLI & Scripts
+For standalone terminal use or custom scripts with Google Gemini / OpenAI:
+```bash
+export GEMINI_API_KEY="your-key-here"
+rm-ai read "Notebook Name" --action summarize
+```
 
-Defined in [`skills/remarkable-ai/SKILL.md`](skills/remarkable-ai/SKILL.md). When Antigravity or a Gemini Agent is active, it can autonomously interact with your tablet, discover notes, and summarize handwriting on demand.
-
----
-
-## Full Command Specification & Architecture
-For the complete catalog of commands (Obsidian sync, live presentation sharing, daily briefing generator, and second monitor setup), see [COMMANDS.md](COMMANDS.md) and [PLAN.md](PLAN.md).
-
----
 
 ## License
 MIT © [khoshkhah](https://github.com/khoshkhah)

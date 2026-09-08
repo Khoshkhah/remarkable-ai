@@ -7,7 +7,7 @@ Execute the following workflow to read the user's reMarkable notes:
 
 1. If no notebook name is specified, read the latest modified notebook:
    ```bash
-   wsl /home/kaveh/remarkable_ai/.venv/bin/python /home/kaveh/remarkable_ai/rm_ai.py read "$1"
+   rm-ai read "$1"
    ```
 2. Inspect the rendered page image generated in the temporary folder or pass it to vision.
 3. Provide:

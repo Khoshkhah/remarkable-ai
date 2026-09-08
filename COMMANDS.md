@@ -7,6 +7,17 @@ This document defines the complete catalog of commands available across:
 
 ---
 
+## Category 0: Setup & Device Management
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| **`python install.py`** | `python install.py` | One-step automated installer: sets up package, AI skills, and verifies wireless connectivity. |
+| **`rm-ai setup`** | `rm-ai setup` | Automatically configures AI agent skills for Antigravity, Gemini, and Claude Code without manual copying. |
+| **`rm-ai devices`** | `rm-ai devices [switch]` | Lists configured tablets and allows interactive or direct switching of the active tablet. |
+| **`rm-ai add-device`** | `rm-ai add-device` | Registers a new tablet by ID, display name, and Wi-Fi IP address. |
+
+---
+
 ## Category 1: Discovery & Navigation
 
 | Command | Usage | Description |
