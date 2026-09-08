@@ -603,6 +603,53 @@ static void swap_daily_page(void) {
     if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
 }
 
+#define CYCLE_SETTLE_US 1000000   /* pen in the air after a cycle's few erase strokes, before drawing (4 s only after the start-up sweeps) */
+
+/* phase 0: erase what differs between old and new (only those glyphs, along their own strokes); phase 1: draw
+ * what differs. Texts of a different length are redone whole, since the glyph positions shift. */
+static void update_text(const char *tname, const char *old, const char *new, int dy, int phase) {
+    struct text *t = T(tname); if (!t) return;
+    int i; for (i = 0; i < ngl && gl[i].size != t->size; i++);
+    if (i == ngl) return;
+    if (!old) old = ""; if (!new) new = "";
+    if (strlen(old) != strlen(new)) {
+        if (phase == 0 && old[0]) draw_text(t->size, t->x, t->y + dy, old, 1);
+        if (phase == 1 && new[0]) draw_text(t->size, t->x, t->y + dy, new, 0);
+        return;
+    }
+    double x = t->x; char one[2] = {0, 0};
+    for (int k = 0; new[k]; k++) {
+        if (old[k] != new[k]) { one[0] = phase ? new[k] : old[k]; if (one[0] != ' ') draw_text(t->size, x, t->y + dy, one, !phase); if (page_lost) return; }
+        x += gl[i].adv[(unsigned char)new[k]];
+    }
+}
+
+static void update_zone(int z, const char *old, const char *new, int phase, struct tm *lt) {
+    if (z == 0) { update_text("clock", old, new, 0, phase); return; }
+    if (z >= 4 && z <= 6) {   /* a usage row: bar, percentage, reset day and time, each only if it changed */
+        int i = z - 4; char ob[64], nb[64], name[20];
+        snprintf(ob, sizeof ob, "%s", old); snprintf(nb, sizeof nb, "%s", new);
+        char *op = strtok(ob, "|"), *od = strtok(NULL, "|"), *oh = strtok(NULL, "|");
+        char *np = strtok(nb, "|"), *nd = strtok(NULL, "|"), *nh = strtok(NULL, "|");
+        int opct = op ? atoi(op) : -1, npct = np ? atoi(np) : -1;
+        if (opct != npct) {
+            int span = bars[i].x1 - bars[i].x0;
+            if (phase == 0 && opct > 0) { snprintf(name, sizeof name, "ebar%d.bin", i); stroke_file(name, 1, 0, 0, bars[i].x0 + span * (opct > 100 ? 100 : opct) / 100 + 8); }
+            if (phase == 1 && npct > 0) { snprintf(name, sizeof name, "bar%d.bin", i); stroke_file(name, 0, 0, 0, bars[i].x0 + span * (npct > 100 ? 100 : npct) / 100); }
+            if (page_lost) return;
+        }
+        snprintf(name, sizeof name, "pct%d", i); update_text(name, op, np, 0, phase);
+        if (page_lost) return;
+        snprintf(name, sizeof name, "reset%d", i); struct text *rt = T(name);
+        update_text(name, od, nd, 0, phase);
+        if (page_lost) return;
+        if (rt) update_text(name, oh, nh, (int)(rt->size * 1.15), phase);
+        return;
+    }
+    if (phase == 0 && old[0]) draw_zone(z, old, lt, 1);
+    if (phase == 1 && new[0]) draw_zone(z, new, lt, 0);
+}
+
 static void save_state(char shown[NZ][512], long rm_mtime) {
     char path[600]; snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "w"); if (!f) return;
@@ -678,14 +725,14 @@ int main(int argc, char **argv) {
         ink_begin(&ink);
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
-        int changed[NZ], any = 0; char name[32];
+        int changed[NZ], any = 0, erased = 0;
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
-        for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { draw_zone(z, shown[z], &lt, 1); if (page_lost) break; }   /* out with the old, along its own strokes */
+        for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { update_zone(z, shown[z], want[z], 0, &lt); erased = 1; if (page_lost) break; }   /* out with what changed, along its own strokes */
         if (page_lost) continue;
-        if (any) hover(START_SETTLE_US);
+        if (erased) hover(CYCLE_SETTLE_US);
         for (int z = 0; z < NZ; z++) if (changed[z]) {
             long long t0 = now_us(); long f0 = frames_written;
-            draw_zone(z, want[z], &lt, 0);
+            update_zone(z, shown[z], want[z], 1, &lt);
             if (page_lost) break;
             strcpy(shown[z], want[z]);
             fprintf(stderr, "%s: %s (%.0f s, %ld frames, %.1f ms/frame)\n", ZONES[z], want[z], (now_us() - t0) / 1e6, frames_written - f0,

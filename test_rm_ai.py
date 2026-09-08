@@ -154,7 +154,7 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         erase = events((out / "e190_49.bin").read_bytes())
         assert sum(1 for t, c, v in erase if t == rm_ai.EV_KEY and c == rm_ai.BTN_TOOL_RUBBER and v == 1) == 1
         path = rm_ai.erase_path([[(0, 0), (100, 0)]])
-        assert len(path) == 2 * len(rm_ai.ERASE_OFFSETS) and path[0] == (-6, -10) and path[-1][1] == 10 and path[1][0] == 106
+        assert len(path) == 2 * len(rm_ai.ERASE_OFFSETS) and path[0] == (-6, -12) and path[-1][1] == 12 and path[1][0] == 106
         glyphs = {(int(a), int(b)): float(c) for a, b, c in (l.split() for l in (out / "glyphs").read_text().splitlines())}
         assert glyphs[(40, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(40, ord("0"))]
         layout = (out / "layout").read_text()
