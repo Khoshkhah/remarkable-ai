@@ -21,15 +21,34 @@ def main():
 
     repo_dir = Path(__file__).resolve().parent
 
-    # 2. Install package in editable mode
+    # 2. Install package
     print("📦 Step 1: Installing Python package and dependencies...")
-    try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(repo_dir)], check=True)
-        print("   Package installed successfully!\n")
-    except subprocess.CalledProcessError as e:
-        print(f"   Installation error: {e}")
-        print("   Please check your pip environment.")
-        sys.exit(1)
+    install_cmds = [
+        [sys.executable, "-m", "pip", "install", "-e", str(repo_dir)],
+        [sys.executable, "-m", "pip", "install", str(repo_dir)],
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", "-e", str(repo_dir)],
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", str(repo_dir)],
+    ]
+    installed = False
+    for cmd in install_cmds:
+        try:
+            res = subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            installed = True
+            print("   Package and dependencies installed successfully!\n")
+            break
+        except subprocess.CalledProcessError:
+            continue
+
+    if not installed:
+        # If all silent attempts failed, run once with full output so the user sees the pip error
+        print("   Attempting verbose pip install...")
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", str(repo_dir)], check=True)
+            print("   Package installed successfully!\n")
+        except subprocess.CalledProcessError as e:
+            print(f"   Installation error: {e}")
+            print("   Please check your pip/python environment.")
+            sys.exit(1)
 
     # 3. Configure AI Agents (Antigravity, Gemini, Claude Code)
     print("🤖 Step 2: Configuring AI Agents...")
