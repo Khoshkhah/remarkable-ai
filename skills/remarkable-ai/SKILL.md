@@ -7,18 +7,31 @@ description: Wirelessly inspects, reads, and analyzes handwritten notes, sketche
 
 This skill enables agents to communicate wirelessly with a reMarkable 2 tablet over local Wi-Fi.
 
-## Capabilities:
-1. **List Notebooks**: Discover all notebooks, folders, page counts, and last modified timestamps.
-2. **Read & Transcribe Handwriting**: Pull `.rm` vector stroke files, render them into crisp PNG images, and use multimodal vision to read cursive, English, Persian/Farsi, and mathematical formulas.
-3. **Extract Action Items**: Automatically scan notes for to-do items, tasks, and assignments.
-4. **Push Documents**: Generate formatted PDFs and upload them wirelessly directly into the tablet library.
+## How to Fulfill User Requests:
 
-## Commands:
-- `rm-ai list`: List all notebooks.
-- `rm-ai read [NOTEBOOK_NAME] [--page N] [--action summarize|transcribe|tasks]`: Render page and analyze.
-- `rm-ai export [NOTEBOOK_NAME]`: Export pages as PNG images.
+### 1. Listing Notebooks:
+When the user asks to list, find, or search notebooks:
+- Run: `rm-ai list`
+- Present the notebook titles, UUIDs, and page counts in a clean table.
+
+### 2. Reading and Analyzing Notes / Handwriting / Diagrams:
+When the user asks to read, transcribe, summarize, or analyze a page from any notebook:
+1. Identify the notebook name and page number (defaults to latest opened page if omitted).
+2. Fetch and render the page to a temporary image:
+   `rm-ai read "<notebook_name>" --page <page_num> --save temp_page.png`
+3. Inspect the rendered image using `view_file` on `temp_page.png`.
+4. Use your multimodal vision to:
+   - Accurately transcribe all handwritten English, Persian/Farsi, or other multilingual text.
+   - Explain drawings, architectures, graphs, mind maps, and mathematical formulas.
+   - Extract actionable to-dos and next steps.
+5. Delete `temp_page.png` after inspection.
+
+### 3. Tablet & Device Management:
+- To switch active tablets: `rm-ai devices [number_or_name]`
+- To register a new tablet: `rm-ai add-device`
+- To target a specific tablet for a single command: `rm-ai --device <name> list`
 
 ## Architecture:
-- Connection: SSH over Wi-Fi (`ssh rm2` or `ssh root@192.168.18.18`)
+- Connection: SSH over Wi-Fi (`ssh rm2` or `ssh root@<IP>`)
 - Storage root: `/home/root/.local/share/remarkable/xochitl/`
 - Vector parser: `rmscene` v6 lines parser with SVG/Cairo rendering.
