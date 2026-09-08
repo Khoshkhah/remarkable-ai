@@ -41,27 +41,42 @@ rm-ai list
 
 `remarkable-ai` supports multiple tablets connected to your Wi-Fi network.
 
-### 1. View Configured Tablets
+### 1. View & Interactively Select Tablet
 ```bash
-rm-ai devices
+# Show configured tablets and select interactively:
+rm-ai device
 ```
 Output:
 ```text
 Configured reMarkable Tablets:
-  [ACTIVE] rm2        - reMarkable 2 (Primary) (Host: rm2)
-           rm-alt     - reMarkable 2 (Secondary) (Host: rm-alt)
+  1. [ACTIVE] rm2        - reMarkable 2 (Primary) (IP: 192.168.18.18)
+  2.          rm-alt     - reMarkable 2 (Secondary) (IP: N/A)
+
+Select tablet number or name to activate (Enter to keep current): 2
+Switched active tablet to: [rm-alt] reMarkable 2 (Secondary)
 ```
 
-### 2. Switch Active Tablet
+### 2. Direct Switch by Name or Number
 ```bash
-# Switch to your secondary tablet:
+# Switch to tablet by name or number:
+rm-ai device 2
 rm-ai device rm-alt
 
-# Switch back to your primary tablet:
+# Switch back to primary:
+rm-ai device 1
 rm-ai device rm2
 ```
 
-### 3. Target a Tablet for a Single Command
+### 3. Add a New Tablet
+```bash
+# Interactively register a new tablet:
+rm-ai add-device
+
+# Or with arguments:
+rm-ai add-device --id rm-work --name "Work Tablet" --ip 192.168.18.25
+```
+
+### 4. Target a Tablet for a Single Command
 You don't need to switch active devices if you just want to run one command on another tablet:
 ```bash
 # List notebooks on your secondary tablet:
@@ -70,6 +85,7 @@ rm-ai --device rm-alt list
 # Read notes from your secondary tablet:
 rm-ai --device rm-alt read "Research"
 ```
+
 
 ---
 
