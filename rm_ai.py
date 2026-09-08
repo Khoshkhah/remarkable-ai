@@ -806,16 +806,18 @@ class SevenSegmentDigit:
         self.box_eraser_coords = self._compute_box_eraser_coords()
 
     def _compute_box_eraser_coords(self):
-        # 4 vertical zigzag passes spanning the digit's bounding box
+        # 3 overlapping vertical lanes with dense points (steps every 12px) to fully wipe the digit box
         x, y, w, h = self.x, self.y, self.w, self.h
-        pad = 6
-        x_lanes = [x + int(w * f) for f in [0.15, 0.38, 0.62, 0.85]]
-        pts = [
-            (x_lanes[0], y - pad), (x_lanes[0], y + h + pad),
-            (x_lanes[1], y + h + pad), (x_lanes[1], y - pad),
-            (x_lanes[2], y - pad), (x_lanes[2], y + h + pad),
-            (x_lanes[3], y + h + pad), (x_lanes[3], y - pad),
-        ]
+        pad = 8
+        x_lanes = [x + int(w * f) for f in [0.18, 0.50, 0.82]]
+        steps = 15
+        pts = []
+        for lane_idx, lx in enumerate(x_lanes):
+            y1, y2 = y - pad, y + h + pad
+            if lane_idx % 2 == 0:
+                pts.extend([(lx, int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)])
+            else:
+                pts.extend([(lx, int(y2 - (y2 - y1) * i / steps)) for i in range(steps + 1)])
         return pts
 
     def _compute_segment_coords(self):
