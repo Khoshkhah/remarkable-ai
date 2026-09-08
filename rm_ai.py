@@ -150,14 +150,18 @@ def render_rm_to_png(rm_path, output_png):
             from rmscene import read_blocks, SceneLineItemBlock
             blocks = list(read_blocks(f))
             line_blocks = [b for b in blocks if isinstance(b, SceneLineItemBlock)]
-            if not line_blocks:
+            sample_values = [type(lb.item.value).__name__ if lb.item and lb.item.value else 'None' for lb in line_blocks[:10]]
+            print(f"Debug: {len(line_blocks)} line blocks, sample values: {sample_values}")
+            valid_blocks = [lb for lb in line_blocks if lb.item and lb.item.value and hasattr(lb.item.value, 'points') and lb.item.value.points]
+            print(f"Debug: {len(valid_blocks)} valid blocks with points")
+            if not valid_blocks:
                 return False
 
             dwg = svgwrite.Drawing(size=('1404px', '1872px'), profile='tiny')
             dwg.add(dwg.rect(insert=(0, 0), size=('100%', '100%'), fill='white'))
 
             all_x, all_y = [], []
-            for lb in line_blocks:
+            for lb in valid_blocks:
                 for p in lb.item.value.points:
                     all_x.append(p.x)
                     all_y.append(p.y)
@@ -166,7 +170,7 @@ def render_rm_to_png(rm_path, output_png):
             offset_x = 702 if min_x < 0 else 0
             offset_y = 0
 
-            for lb in line_blocks:
+            for lb in valid_blocks:
                 pts = [(p.x + offset_x, p.y + offset_y) for p in lb.item.value.points]
                 if len(pts) > 1:
                     dwg.add(dwg.polyline(pts, stroke='black', stroke_width=2.5, fill='none', stroke_linecap='round', stroke_linejoin='round'))
@@ -788,7 +792,7 @@ DIGIT_SEGMENTS = {
 }
 
 class SevenSegmentDigit:
-    """Manages state and minimal-delta stroke transitions for a single 7-segment character."""
+    """Manages full-digit box wiping and clean redrawing for 7-segment characters."""
     def __init__(self, stylus, top_left_x, top_left_y, width=95, height=175, thickness=10):
         self.stylus = stylus
         self.x = top_left_x
@@ -797,85 +801,84 @@ class SevenSegmentDigit:
         self.h = height
         self.t = max(4, thickness)
         self.mid_y = top_left_y + height // 2
-        self.current_segments = set()
-        self.draw_coords = self._compute_segment_coords(is_eraser=False)
-        self.erase_coords = self._compute_segment_coords(is_eraser=True)
+        self.current_char = None
+        self.draw_coords = self._compute_segment_coords()
+        self.box_eraser_coords = self._compute_box_eraser_coords()
 
-    def _compute_segment_coords(self, is_eraser=False):
+    def _compute_box_eraser_coords(self):
+        # 4 vertical zigzag passes spanning the digit's bounding box
+        x, y, w, h = self.x, self.y, self.w, self.h
+        pad = 6
+        x_lanes = [x + int(w * f) for f in [0.15, 0.38, 0.62, 0.85]]
+        pts = [
+            (x_lanes[0], y - pad), (x_lanes[0], y + h + pad),
+            (x_lanes[1], y + h + pad), (x_lanes[1], y - pad),
+            (x_lanes[2], y - pad), (x_lanes[2], y + h + pad),
+            (x_lanes[3], y + h + pad), (x_lanes[3], y - pad),
+        ]
+        return pts
+
+    def _compute_segment_coords(self):
         x, y, w, h, m = self.x, self.y, self.w, self.h, self.mid_y
         draw_gap = 8
-        erase_gap = draw_gap + 16
 
-        def h_bar(y_pos, is_erase):
-            if is_erase:
-                steps = 3
-                x1, x2 = x + erase_gap, x + w - erase_gap
-                return [(int(x1 + (x2 - x1) * i / steps), y_pos) for i in range(steps + 1)]
-            else:
-                x1, x2 = x + draw_gap, x + w - draw_gap
-                steps = 4
-                pts = []
-                # 4 dense overlapping passes to fill a 10px wide solid black bar
-                offsets = [-4, -1, 2, 5]
-                for pass_idx, off in enumerate(offsets):
-                    y_curr = y_pos + off
-                    if pass_idx % 2 == 0:
-                        pts.extend([(int(x1 + (x2 - x1) * i / steps), y_curr) for i in range(steps + 1)])
-                    else:
-                        pts.extend([(int(x2 - (x2 - x1) * i / steps), y_curr) for i in range(steps + 1)])
-                return pts
+        def h_bar(y_pos):
+            x1, x2 = x + draw_gap, x + w - draw_gap
+            steps = 4
+            pts = []
+            offsets = [-4, -1, 2, 5]
+            for pass_idx, off in enumerate(offsets):
+                y_curr = y_pos + off
+                if pass_idx % 2 == 0:
+                    pts.extend([(int(x1 + (x2 - x1) * i / steps), y_curr) for i in range(steps + 1)])
+                else:
+                    pts.extend([(int(x2 - (x2 - x1) * i / steps), y_curr) for i in range(steps + 1)])
+            return pts
 
-        def v_bar(x_pos, y_start, y_end, is_erase):
-            if is_erase:
-                steps = 3
-                y1, y2 = y_start + erase_gap, y_end - erase_gap
-                return [(x_pos, int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)]
-            else:
-                y1, y2 = y_start + draw_gap, y_end - draw_gap
-                steps = 4
-                pts = []
-                offsets = [-4, -1, 2, 5]
-                for pass_idx, off in enumerate(offsets):
-                    x_curr = x_pos + off
-                    if pass_idx % 2 == 0:
-                        pts.extend([(x_curr, int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)])
-                    else:
-                        pts.extend([(x_curr, int(y2 - (y2 - y1) * i / steps)) for i in range(steps + 1)])
-                return pts
+        def v_bar(x_pos, y_start, y_end):
+            y1, y2 = y_start + draw_gap, y_end - draw_gap
+            steps = 4
+            pts = []
+            offsets = [-4, -1, 2, 5]
+            for pass_idx, off in enumerate(offsets):
+                x_curr = x_pos + off
+                if pass_idx % 2 == 0:
+                    pts.extend([(x_curr, int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)])
+                else:
+                    pts.extend([(x_curr, int(y2 - (y2 - y1) * i / steps)) for i in range(steps + 1)])
+            return pts
 
         return {
-            'A': h_bar(y, is_eraser),
-            'B': v_bar(x + w, y, m, is_eraser),
-            'C': v_bar(x + w, m, y + h, is_eraser),
-            'D': h_bar(y + h, is_eraser),
-            'E': v_bar(x, m, y + h, is_eraser),
-            'F': v_bar(x, y, m, is_eraser),
-            'G': h_bar(m, is_eraser),
+            'A': h_bar(y),
+            'B': v_bar(x + w, y, m),
+            'C': v_bar(x + w, m, y + h),
+            'D': h_bar(y + h),
+            'E': v_bar(x, m, y + h),
+            'F': v_bar(x, y, m),
+            'G': h_bar(m),
         }
 
     def transition_to(self, char):
-        target = DIGIT_SEGMENTS.get(char, set())
-        to_turn_off = self.current_segments - target
-        to_turn_on = target - self.current_segments
+        if self.current_char == char:
+            return 0
 
-        # 1. Erase segments that turned off (single center-line stroke with inset endpoints)
-        for seg in to_turn_off:
-            coords = self.erase_coords[seg]
-            self.stylus.stroke(coords, is_eraser=True, pressure=3200)
+        # 1. If updating an existing character, wipe its bounding box completely
+        if self.current_char is not None:
+            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3400)
 
-        # 2. Draw segments that turned on (bold 4-pass solid black bar)
-        for seg in to_turn_on:
+        # 2. Draw all active segments for the new character fresh and bold
+        target_segments = DIGIT_SEGMENTS.get(char, set())
+        for seg in target_segments:
             coords = self.draw_coords[seg]
             self.stylus.stroke(coords, is_eraser=False, pressure=3900)
 
-        self.current_segments = target
-        return len(to_turn_off) + len(to_turn_on)
+        self.current_char = char
+        return 1
 
     def clear(self):
-        for seg in self.current_segments:
-            coords = self.erase_coords[seg]
-            self.stylus.stroke(coords, is_eraser=True, pressure=3200)
-        self.current_segments = set()
+        if self.current_char is not None:
+            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3400)
+            self.current_char = None
 
 
 class DigitalClock:
