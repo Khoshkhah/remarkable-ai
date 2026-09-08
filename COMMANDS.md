@@ -71,7 +71,7 @@ This document defines the complete catalog of commands available across:
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
-| **`rm-ai clock`** / **`/rm-clock`** | `rm-ai clock [--pos top-right] [--duration N] [--clear]` | Live 7-segment digital clock via Virtual Stylus (/dev/input/event1). Uses minimal-delta state machine to toggle only changed segments each second with zero reload. |
+| **`rm-ai clock`** / **`/rm-clock`** | `rm-ai clock [--pos center] [--size large] [--once] [--duration N] [--clear]` | Live 7-segment digital clock via Virtual Stylus (/dev/input/event1). Features minimal-delta state machine, bold multi-pass segments, configurable sizes (small, medium, large, xlarge), and single-shot time stamp mode (--once). |
 | **`rm-ai draw`** / **`/rm-draw`** | `rm-ai draw line --from X1,Y1 --to X2,Y2` | Injects live vector strokes directly into the active notebook screen in real time without page reload or tablet restart. |
 
 ---
