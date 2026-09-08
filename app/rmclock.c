@@ -37,6 +37,7 @@ int main(int argc, char **argv) {
         if (!is_open) lost = 0;                  /* a fresh open of the document is a fresh start */
         if (!is_open || lost) {
             if (active) { fprintf(stderr, "clock document closed, stopping\n"); close_device(); active = 0; }
+            if (!is_open) give_back_the_pen(doc);
             sleep(2);
             continue;
         }
@@ -78,10 +79,10 @@ int main(int argc, char **argv) {
             if (page_lost) { page_lost = 0; lost = 1; continue; }   /* redrawn from scratch when the page is back */
             if (!shown[0]) fprintf(stderr, "showing %s\n", want);
             strcpy(shown, want);
+            ink_drawn(&ink);
         }
         if (page_lost) { page_lost = 0; lost = 1; continue; }
-        if (ink_lost(&ink)) { lost = 1; continue; }
-        if (ink_wiped(&ink)) { shown[0] = 0; continue; }     /* colons and frame are gone too: drawn again below */
+        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) { shown[0] = 0; continue; }   /* everything drawn again below */
         long long us = interval * 1000000LL - now_us() % (interval * 1000000LL);
         nap(us);
     }

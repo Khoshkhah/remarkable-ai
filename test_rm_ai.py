@@ -144,22 +144,24 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
     from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
-        rm_ai.bake_dash_app(out, rm_ai.dash_pen_profile("Ballpointv2"))
+        rm_ai.bake_dash_app(out)
         names = {p.name for p in out.iterdir()}
         for size, chars in rm_ai.GLYPH_SETS.items():
             assert all(f"g{size}_{ord(c)}.bin" in names for c in chars), size
         assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])
         assert {"bar0.bin", "bar1.bin", "bar2.bin", "layout", "glyphs"} <= names
         glyphs = {(int(a), int(b)): float(c) for a, b, c in (l.split() for l in (out / "glyphs").read_text().splitlines())}
-        assert glyphs[(44, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(44, ord("0"))]
-        rm_ai.render_dash_pages(out, "Burnaby", None, days=2)
-        assert len(list((out / "pages").glob("*.pdf"))) == 3
+        assert glyphs[(56, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(56, ord("0"))]
         layout = (out / "layout").read_text()
         assert f"base {rm_ai.GLYPH_BASE[0]} {rm_ai.GLYPH_BASE[1]}" in layout and "text clock 190 80 115" in layout and "bar 0 278 521 1013" in layout
-        # a glyph is baked at the base origin: its first pen-down lands near it
+        # single-line glyphs: a digit is one to three strokes, its first pen-down near the glyph base
         evs = events((out / "g190_48.bin").read_bytes())
+        assert 1 <= sum(1 for t, c, v in evs if t == rm_ai.EV_KEY and c == rm_ai.BTN_TOOL_PEN and v == 1) <= 3
         first_y = next(v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y)
-        assert abs(first_y * 1404 / 15725 - rm_ai.GLYPH_BASE[0]) < 80
+        assert abs(first_y * 1404 / 15725 - rm_ai.GLYPH_BASE[0]) < 120
+        assert len(rm_ai.glyph_centerlines(":", 190)) == 2 and 1 <= len(rm_ai.glyph_centerlines("8", 110)) <= 3
+        rm_ai.render_dash_pages(out, "Burnaby", None, days=2)
+        assert len(list((out / "pages").glob("*.jpg"))) == 3
     assert rm_ai.usage_file_text({"windows": [("Session", 12.4, "2026-09-08T21:59:59+00:00")]}).count("\n") == 5
 
 

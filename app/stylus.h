@@ -281,9 +281,36 @@ static void close_device(void) { if (fd >= 0) { lift_everything(); close(fd); fd
 
 /* our strokes must keep showing up in the page's autosave; if they stop while we are awake, the
  * document is not what is on screen. A long gap between checks was a suspend and does not count. */
-struct ink { const char *rm; long seen, awake_s, biggest; long long last; };
+/* When a document is closed, xochitl remembers its active tool in its .content and restores it on
+ * open; after "Erase all" that is the eraser, and then every pen stroke erases. Our own documents get
+ * the pen back while they are closed, so each open starts drawing. Returns 1 when it changed the file. */
+static int give_back_the_pen(const char *doc) {
+    char path[600], tmp[600]; snprintf(path, sizeof path, "/home/root/.local/share/remarkable/xochitl/%s.content", doc);
+    FILE *f = fopen(path, "rb"); if (!f) return 0;
+    static char buf[1 << 17]; size_t n = fread(buf, 1, sizeof buf - 16, f); fclose(f); buf[n] = 0;
+    const char *key = "\"LastActiveTool\": \"eraser\"";
+    char *p = strstr(buf, key); if (!p) return 0;
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *o = fopen(tmp, "wb"); if (!o) return 0;
+    fwrite(buf, 1, p - buf, o); fputs("\"LastActiveTool\": \"primary\"", o); fputs(p + strlen(key), o); fclose(o);
+    if (rename(tmp, path)) return 0;
+    fprintf(stderr, "the page was left with the eraser selected: pen selected again for the next open\n");
+    return 1;
+}
+
+struct ink { const char *rm; long seen, awake_s, biggest, size_at_draw; int drew; long long last; };
 static long fsize(const char *path) { struct stat st; return stat(path, &st) ? 0 : (long)st.st_size; }
-static void ink_reset(struct ink *w, const char *rm) { w->rm = rm; w->seen = mtime(rm); w->awake_s = 0; w->last = now_us(); w->biggest = fsize(rm); }
+static void ink_reset(struct ink *w, const char *rm) { w->rm = rm; w->seen = mtime(rm); w->awake_s = 0; w->last = now_us(); w->biggest = fsize(rm); w->drew = 0; }
+static void ink_drawn(struct ink *w) { w->drew = 1; w->size_at_draw = fsize(w->rm); }   /* call after a cycle that drew */
+/* strokes were drawn, the page has been saved since, and it did not grow: the pen is not inking (the
+ * eraser is the selected tool). Returns 1 once per drawing cycle that left nothing behind. */
+static int ink_none(struct ink *w) {
+    if (!w->drew || mtime(w->rm) == w->seen) return 0;
+    w->drew = 0;
+    if (fsize(w->rm) > w->size_at_draw) return 0;
+    fprintf(stderr, "the strokes left no ink: is the eraser selected on this page? (retrying every minute)\n");
+    return 1;
+}
 /* the page was wiped (Erase all, or the file removed): its file shrank to a fraction of what our strokes filled */
 static int ink_wiped(struct ink *w) {
     long sz = fsize(w->rm);
@@ -299,7 +326,8 @@ static int ink_lost(struct ink *w) {
     w->last = now;
     if (m != w->seen) { w->seen = m; w->awake_s = 0; } else w->awake_s += gap < 10 ? gap : 0;
     if (w->awake_s <= INK_TIMEOUT_S) return 0;
-    fprintf(stderr, "no autosave of our strokes for %ld s: page not on screen, stopping until it is reopened\n", w->awake_s);
+    fprintf(stderr, "nothing of ours was saved for %ld s: is a pen selected on this page? (drawing everything again)\n", w->awake_s);
+    w->awake_s = 0;
     return 1;
 }
 

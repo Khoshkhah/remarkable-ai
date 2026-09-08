@@ -137,25 +137,30 @@ services before any push, and `dashboard --install --no-push` reuses the page wi
 `rmclock <dir> [xochitl.conf] [event device]` so a dry run on the PC against a plain file works.
 
 **Tablet-resident dashboard** (`dashboard --install`, `app/rmdash.c`, shares `app/stylus.h` with the
-clock): the page is the live template with a printed weather header only (`render_dashboard_image(live=True,
-pen_weather=True, now=day)`); `render_dash_pages()` renders it for the next `DASH_STOCK_DAYS` days into
-`pages/YYYY-MM-DD.pdf` and rmdash's `swap_daily_page()` copies the day's page over the document's PDF
-and restarts xochitl, only while no document is open (`home_screen()`); the pen strokes live in the
-`.rm` and survive the swap; the PC's standby cron tops the stock up (`top_up_dash_pages`, no reload).
-`TABLET_DASH_LAYOUT` is the single source of the pen-owned zones (clock, the three usage rows, the
-weather values; erased whole when a value in them changes), text origins and bars, written to the
-tablet as `layout`; rmdash draws only zones whose sweep file exists, so enabling the date/calendar
-zones is a layout change (the C code for them is there). `bake_dash_app()` records every glyph of `GLYPH_SETS` once at
-`GLYPH_BASE` with `text_strokes()` (one file per glyph and size, advance widths in `glyphs`), the zone
-sweeps, full-length bars (truncated by the program at the percentage) and the today ring; rmdash shifts
-glyph events by a display-px offset converted to digitizer units. Data: Open-Meteo directly, Claude
-usage either from a `token` file (a Claude Code login made for the tablet in another
-`CLAUDE_CONFIG_DIR`; the program renews it with `refresh_claude_token`'s request, and a login cannot be
-shared: renewal invalidates the other holder at once) or from the `usage` file the PC's standby run
-writes (`feed_dash_usage`, `dash_app.feed` in the config). HTTPS is the tablet's `openssl s_client
--ign_eof` with HTTP/1.0 (no chunking); JSON is scanned, not parsed. `state` remembers what is drawn
-against the page's `.rm` mtime so reopening an unchanged page draws nothing. `RMDASH_FIXTURES=<dir>`
-makes it read `usage.json`/`weather.json`/`token.json` instead of the network for dry runs.
+clock). The page: `render_dash_pages()` renders JPEG templates for the next `DASH_STOCK_DAYS` days
+(`render_dashboard_image(live=True, pen_weather=True, now=day)`: everything printed except the weather
+values); rmdash's `compose_page()` writes a one-page PDF (the JPEG as a DCTDecode XObject plus the
+weather block as Helvetica text in the sleep screen's layout, `weather_block()`) and
+`swap_daily_page()` puts it over the document's PDF and restarts xochitl, only while no document is
+open (`home_screen()`), on a new day or when the printed weather is over 6 h old; the first push is the
+PC's full page. The pen strokes live in the `.rm` and survive the swap; the PC's standby cron tops the
+template stock up (`top_up_dash_pages`, no reload). `TABLET_DASH_LAYOUT` is the single source of the
+pen-owned zones (clock and the three usage rows, erased whole when a value in them changes), text
+origins and bars, written to the tablet as `layout`; rmdash draws only zones whose sweep file exists.
+Glyphs are single-line: `glyph_centerlines()` thins the page font's glyph (Zhang-Suen) and traces the
+skeleton into one to three polylines per glyph, so a thick pen (the Marker) draws a bold digit in a
+second; `bake_dash_app()` records them at `GLYPH_BASE` with advance widths in `glyphs`. Data:
+Open-Meteo directly (also while idle, for the printed block), Claude usage either from a `token` file
+(a Claude Code login made for the tablet in another `CLAUDE_CONFIG_DIR`; the program renews it with
+`refresh_claude_token`'s request, and a login cannot be shared: renewal invalidates the other holder at
+once) or from the `usage` file the PC's standby run writes (`feed_dash_usage`, `dash_app.feed` in the
+config). HTTPS is the tablet's `openssl s_client -ign_eof` with HTTP/1.0 (no chunking); JSON is scanned,
+not parsed. `state` remembers what is drawn against the page's `.rm` mtime so reopening an unchanged
+page draws nothing; `ink_wiped`/`ink_none`/`ink_lost` (stylus.h) notice an erased page, strokes that
+leave no ink (eraser selected) and no autosave at all, and make the program draw everything again;
+`give_back_the_pen()` rewrites `"LastActiveTool": "eraser"` to `"primary"` in the document's `.content`
+while it is closed. `RM_FIXTURES=<dir>` makes it read `usage.json`/`weather.json`/`token.json` instead of
+the network and skip the xochitl restart for dry runs.
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
 image locally. `--mode standby` scp's it to `/usr/share/remarkable/suspended.png`, backing the factory

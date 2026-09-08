@@ -118,13 +118,16 @@ static int jarr(const char *s, const char *key, double *out, int max) {   /* num
     }
     return n;
 }
-static int jarr_str(const char *s, const char *key, char out[][12], int max) {
+static int jarr_str(const char *s, const char *key, char out[][12], int max) {   /* keeps the first 11 chars, e.g. a date or "2026-09-09T06:41" -> the time part is what matters */
     const char *p = jkey(s, key); if (!p || *p != '[') return 0;
     int n = 0; p++;
     while (*p && *p != ']' && n < max) {
         while (*p == ' ' || *p == ',') p++;
         if (*p != '"') break;
-        p++; size_t i = 0; while (*p && *p != '"' && i < 11) out[n][i++] = *p++; out[n][i] = 0; if (*p) p++; n++;
+        p++; const char *q = p; while (*q && *q != '"') q++;
+        const char *t = memchr(p, 'T', q - p);                   /* an ISO time: keep HH:MM only */
+        if (t && q - t >= 6) snprintf(out[n], 12, "%.5s", t + 1); else snprintf(out[n], 12, "%.*s", (int)(q - p) > 11 ? 11 : (int)(q - p), p);
+        p = *q ? q + 1 : q; n++;
     }
     return n;
 }
@@ -140,14 +143,14 @@ static const char *WMO(int code) {   /* WEATHER_TEXT in rm_ai.py */
     }
 }
 
-static struct { int ok; double temp, feels, wind; int code, n; char day[6][12]; double dcode[6], dmax[6], dmin[6], dpop[6]; } wx;
+static struct { int ok; double temp, feels, wind; int code, n; char day[6][12], rise[6][12], set[6][12]; double dcode[6], dmax[6], dmin[6], dpop[6]; time_t at; } wx;
 static char big[65536];
 
 static void fetch_weather(void) {
     if (lat == 0 && lon == 0) return;
     char req[700];
     snprintf(req, sizeof req, "GET /v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
-             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=6&wind_speed_unit=ms HTTP/1.0\r\n"
+             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset&timezone=auto&forecast_days=6&wind_speed_unit=ms HTTP/1.0\r\n"
              "Host: api.open-meteo.com\r\nUser-Agent: remarkable-ai/0.1\r\n\r\n", lat, lon);
     int st = https("api.open-meteo.com", req, big, sizeof big);
     const char *cur = st == 200 ? strstr(big, "\"current\":{") : NULL, *day = st == 200 ? strstr(big, "\"daily\":{") : NULL;
@@ -157,7 +160,8 @@ static void fetch_weather(void) {
     wx.n = jarr_str(day, "time", wx.day, 6);
     jarr(day, "weather_code", wx.dcode, 6); jarr(day, "temperature_2m_max", wx.dmax, 6); jarr(day, "temperature_2m_min", wx.dmin, 6);
     if (!jarr(day, "precipitation_probability_max", wx.dpop, 6)) for (int i = 0; i < 6; i++) wx.dpop[i] = -999;
-    wx.ok = wx.n > 0;
+    jarr_str(day, "sunrise", wx.rise, 6); jarr_str(day, "sunset", wx.set, 6);
+    wx.ok = wx.n > 0; wx.at = time(NULL);
     fprintf(stderr, "weather: %.0f%c %s, %d days\n", wx.temp, 0xB0, WMO(wx.code), wx.n);
 }
 
@@ -277,8 +281,9 @@ static void draw_zone(int z, const char *want, struct tm *lt) {
         if (pct > 0) stroke_file(name, 0, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100);
         snprintf(s, sizeof s, "%d", pct); snprintf(name, sizeof name, "pct%d", i); draw_at(name, s, 0);
         snprintf(name, sizeof name, "reset%d", i);
+        struct text *rt = T(name);
         if (dow) draw_at(name, dow, 0);
-        if (hm) draw_at(name, hm, 52);
+        if (hm && rt) draw_at(name, hm, (int)(rt->size * 1.15));   /* second line under the first */
     } else if (z == 7) {
         char *temp = strtok(buf, "|"), *text = strtok(NULL, "|"), *line = strtok(NULL, "|");
         if (temp) draw_at("temp", temp, 0);
@@ -293,23 +298,102 @@ static void draw_zone(int z, const char *want, struct tm *lt) {
     }
 }
 
+/* ---------- the printed page: the PC's JPEG template for the day + the weather block as PDF text ---------- */
+#define PT (72.0 / 226.0)   /* display px -> PDF points */
+static char pdfbuf[1 << 16];
+static size_t pdfn = 0;
+static void pdf_esc(const char *s) {   /* PDF string with WinAnsi bytes (0xB0 degree, 0x95 bullet) */
+    pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, "(");
+    for (const unsigned char *p = (const unsigned char *)s; *p && pdfn < sizeof pdfbuf - 8; p++) {
+        if (*p == '(' || *p == ')' || *p == '\\') pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, "\\%c", *p);
+        else if (*p < 32 || *p > 126) pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, "\\%03o", *p);
+        else pdfbuf[pdfn++] = (char)*p;
+    }
+    pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, ")");
+}
+/* text with its top-left at (x, y) display px in a font of `px` height, as PIL draws it (DejaVu ascent 0.93) */
+static void pdf_text(int bold, double px, double x, double y, int gray, const char *s) {
+    pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, "BT /%s %.2f Tf %.3f g %.2f %.2f Td ", bold ? "FB" : "FR", px * PT, gray / 255.0, x * PT, (1872 - y - 0.93 * px) * PT);
+    pdf_esc(s);
+    pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, " Tj ET\n");
+}
+static void pdf_line(double x0, double y0, double x1, double y1, double w, int gray) {
+    pdfn += snprintf(pdfbuf + pdfn, sizeof pdfbuf - pdfn, "%.3f G %.2f w %.2f %.2f m %.2f %.2f l S\n", gray / 255.0, w * PT, x0 * PT, (1872 - y0) * PT, x1 * PT, (1872 - y1) * PT);
+}
+static const char *DOW3[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+static void dow_of(const char *ymd, char *out) {
+    struct tm d = {0}; sscanf(ymd, "%d-%d-%d", &d.tm_year, &d.tm_mon, &d.tm_mday); d.tm_year -= 1900; d.tm_mon -= 1; d.tm_hour = 12;
+    time_t t = mktime(&d); localtime_r(&t, &d); strcpy(out, DOW3[d.tm_wday]);
+}
+/* the weather block exactly as render_dashboard_image() prints it for the sleep screen */
+static void weather_block(void) {
+    char s[200];
+    if (!wx.ok) return;
+    snprintf(s, sizeof s, "%.0f\xB0", wx.temp); pdf_text(1, 96, 630, 478, 0, s);
+    pdf_text(1, 32, 840, 495, 0, WMO(wx.code));
+    if (wx.dpop[0] > -999) snprintf(s, sizeof s, "feels %.0f\xB0  \x95  wind %.0f m/s  \x95  rain %.0f%%", wx.feels, wx.wind, wx.dpop[0]);
+    else snprintf(s, sizeof s, "feels %.0f\xB0  \x95  wind %.0f m/s", wx.feels, wx.wind);
+    pdf_text(0, 22, 840, 545, 0, s);
+    if (wx.rise[0][0]) snprintf(s, sizeof s, "TODAY  H %.0f\xB0  L %.0f\xB0   \x95   sunrise %s   sunset %s", wx.dmax[0], wx.dmin[0], wx.rise[0], wx.set[0]);
+    else snprintf(s, sizeof s, "TODAY  H %.0f\xB0  L %.0f\xB0", wx.dmax[0], wx.dmin[0]);
+    pdf_text(1, 22, 630, 605, 0, s);
+    int y = 655;
+    for (int i = 1; i < wx.n && i < 6; i++, y += 42) {
+        char dow[8]; dow_of(wx.day[i], dow);
+        pdf_text(1, 22, 630, y, 0, dow);
+        pdf_text(0, 22, 720, y, 0, WMO((int)wx.dcode[i]));
+        snprintf(s, sizeof s, "%.0f\xB0 / %.0f\xB0", wx.dmax[i], wx.dmin[i]); pdf_text(0, 22, 1010, y, 0, s);
+        if (wx.dpop[i] > -999) { snprintf(s, sizeof s, "%.0f%%", wx.dpop[i]); pdf_text(0, 22, 1210, y, 0, s); }
+        pdf_line(630, y + 34, 1324, y + 34, 1, 220);
+    }
+}
+/* a one-page PDF: the JPEG template full-page plus the weather block; returns 1 on success */
+static int compose_page(const char *jpg, const char *out) {
+    FILE *f = fopen(jpg, "rb"); if (!f) return 0;
+    fseek(f, 0, SEEK_END); long jl = ftell(f); fseek(f, 0, SEEK_SET);
+    unsigned char *jd = malloc(jl); if (fread(jd, 1, jl, f) != (size_t)jl) { fclose(f); free(jd); return 0; }
+    fclose(f);
+    pdfn = 0;
+    pdfn += snprintf(pdfbuf, sizeof pdfbuf, "q %.2f 0 0 %.2f 0 0 cm /Im1 Do Q\n", 1404 * PT, 1872 * PT);
+    weather_block();
+    FILE *o = fopen(out, "wb"); if (!o) { free(jd); return 0; }
+    long off[8]; int n = 0;
+    n += fprintf(o, "%%PDF-1.4\n");
+    off[1] = n; n += fprintf(o, "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n");
+    off[2] = n; n += fprintf(o, "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n");
+    off[3] = n; n += fprintf(o, "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> /Font << /FB 6 0 R /FR 7 0 R >> >> >> endobj\n", 1404 * PT, 1872 * PT);
+    off[4] = n; n += fprintf(o, "4 0 obj << /Length %zu >> stream\n", pdfn); n += fwrite(pdfbuf, 1, pdfn, o); n += fprintf(o, "\nendstream endobj\n");
+    off[5] = n; n += fprintf(o, "5 0 obj << /Type /XObject /Subtype /Image /Width 1404 /Height 1872 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length %ld >> stream\n", jl);
+    n += fwrite(jd, 1, jl, o); n += fprintf(o, "\nendstream endobj\n");
+    off[6] = n; n += fprintf(o, "6 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >> endobj\n");
+    off[7] = n; n += fprintf(o, "7 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> endobj\n");
+    long xref = n;
+    fprintf(o, "xref\n0 8\n0000000000 65535 f \n");
+    for (int i = 1; i < 8; i++) fprintf(o, "%010ld 00000 n \n", off[i]);
+    fprintf(o, "trailer << /Size 8 /Root 1 0 R >>\nstartxref\n%ld\n%%%%EOF\n", xref);
+    fclose(o); free(jd);
+    return 1;
+}
+
 /* The printed part of the page (date, calendar) is a stock of PDFs the installer left, one per day:
  * on a new day, while nothing is open on the tablet, today's page replaces the document's PDF and
  * xochitl is restarted so it shows it. The pen strokes on the page are kept: they belong to the .rm. */
 static void swap_daily_page(void) {
-    char today[16], printed[32] = "", src[700], cmd[1600];
+    char today[16], printed[64] = "", src[700], tmp[700];
     time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
     strftime(today, sizeof today, "%Y-%m-%d", &lt);
     char ppath[600]; snprintf(ppath, sizeof ppath, "%s/printed", dir);
     FILE *f = fopen(ppath, "r"); if (f) { if (fgets(printed, sizeof printed, f)) printed[strcspn(printed, "\r\n")] = 0; fclose(f); }
-    if (!strcmp(printed, today) || !pdf[0]) return;
-    snprintf(src, sizeof src, "%s/pages/%s.pdf", dir, today);
-    if (access(src, R_OK)) { static int said = 0; if (!said++) fprintf(stderr, "no printed page for %s in the stock\n", today); return; }
+    long printed_at = 0; char pday[16] = ""; sscanf(printed, "%15s %ld", pday, &printed_at);
+    int new_day = strcmp(pday, today) != 0, stale = wx.ok && now - printed_at > 6 * 3600 && wx.at > printed_at;
+    if (!pdf[0] || (!new_day && !stale)) return;
     if (!home_screen()) return;                       /* only between documents: the restart reloads the tablet's app */
-    snprintf(cmd, sizeof cmd, "cp '%s' '%s'", src, pdf);
-    if (system(cmd) != 0) { fprintf(stderr, "could not install the page for %s\n", today); return; }
-    f = fopen(ppath, "w"); if (f) { fputs(today, f); fclose(f); }
-    fprintf(stderr, "printed page for %s installed, restarting xochitl\n", today);
+    snprintf(src, sizeof src, "%s/pages/%s.jpg", dir, today);
+    if (access(src, R_OK)) { static int said = 0; if (!said++) fprintf(stderr, "no printed page for %s in the stock\n", today); return; }
+    snprintf(tmp, sizeof tmp, "%s.new", pdf);
+    if (!compose_page(src, tmp) || rename(tmp, pdf)) { fprintf(stderr, "could not compose the page for %s\n", today); return; }
+    f = fopen(ppath, "w"); if (f) { fprintf(f, "%s %ld\n", today, (long)now); fclose(f); }
+    fprintf(stderr, "printed page for %s composed (%s), restarting xochitl\n", today, new_day ? "new day" : "fresh weather");
     if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
 }
 
@@ -360,6 +444,8 @@ int main(int argc, char **argv) {
                     save_state(shown, mtime(rmfile));
                 }
             }
+            if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); }   /* keeps the printed weather fresh */
+            if (!is_open) give_back_the_pen(doc);
             swap_daily_page();
             sleep(2);
             continue;
@@ -396,8 +482,8 @@ int main(int argc, char **argv) {
                     frames_written > f0 ? (now_us() - t0) / 1e3 / (frames_written - f0) : 0.0);
         }
         if (page_lost) continue;
-        if (ink_lost(&ink)) { lost = 1; continue; }
-        if (ink_wiped(&ink)) { for (int z = 0; z < NZ; z++) shown[z][0] = 0; unlink(state_path); continue; }
+        if (any) ink_drawn(&ink);
+        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) { for (int z = 0; z < NZ; z++) shown[z][0] = 0; unlink(state_path); }
         if (time(NULL) - fetched >= minutes * 60) {        /* network only after drawing; what changed is drawn next round */
             long long t0 = now_us();
             if (zone_on[7]) fetch_weather();

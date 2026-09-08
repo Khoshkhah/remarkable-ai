@@ -1622,53 +1622,168 @@ LIVE_BAR_X = (278, 521)             # x extent of the bar interior the pen fills
 LIVE_CLOCK_ZONE = (66, 100, 800, 320)     # swept clean before each redraw of the big HH:MM (font 190 at 80,115)
 TABLET_DASH_DIR = "/home/root/.local/share/rmdash"
 GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmdash shifts it into place
-# What the tablet-resident dashboard draws with the pen (display px): the time, the three usage rows
-# (as the live page does) and the weather values under the printed weather header. Date and calendar
-# are printed: the installer leaves a stock of pages for the coming days and the tablet swaps in the
-# day's page itself. The one source app/rmdash.c reads as `layout`; zones are erased whole when a value
-# in them changes; texts are (font size, x, y) of a text origin.
+# What the tablet-resident dashboard draws with the pen (display px): the time and the three usage rows,
+# as the live page does, in single-line glyphs of the page font (glyph_centerlines) that a thick pen such
+# as the Marker turns into bold digits in one or two strokes. Date, calendar and the weather block are
+# printed: the installer leaves JPEG templates for the coming days and the tablet composes each day's
+# page itself (app/rmdash.c compose_page, weather in the sleep screen's format). The one source
+# app/rmdash.c reads as `layout`; zones are erased whole when a value in them changes; texts are
+# (font size, x, y) of a text origin.
 TABLET_DASH_LAYOUT = {
-    "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565),
-              "weather": (620, 470, 1330, 965)},
-    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (44, 335, 1060), "pct1": (110, 105, 1235), "reset1": (44, 335, 1250),
-              "pct2": (110, 105, 1425), "reset2": (44, 335, 1440),
-              "temp": (96, 630, 478), "wtext": (44, 840, 500), "wline": (44, 630, 600),
-              "fcdow": (44, 630, 660), "fctext": (44, 730, 660), "fctemp": (44, 1060, 660), "fcpop": (44, 1245, 660)},
+    "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565)},
+    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (56, 335, 1050), "pct1": (110, 105, 1235), "reset1": (56, 335, 1240),
+              "pct2": (110, 105, 1425), "reset2": (56, 335, 1430)},
     "bars": [(LIVE_BAR_X[0], LIVE_BAR_X[1], y + 13) for y in LIVE_USAGE_ROWS],
 }
-GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 96: "0123456789°-",
-              44: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789°%/,.:-'"}
-DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to swap in by itself
+GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 56: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:"}
+DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to compose and swap in by itself
 
 
 def render_dash_pages(out, city_name, tasks, days=DASH_STOCK_DAYS):
-    """The dashboard page for today and the coming `days`, as pages/YYYY-MM-DD.pdf; returns today's path."""
+    """JPEG templates of the dashboard page for today and the coming `days` (pages/YYYY-MM-DD.jpg):
+    everything printed except the weather block, which the tablet adds when it composes the page."""
     (out / "pages").mkdir(exist_ok=True)
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    first = None
     for i in range(days + 1):
         day = today + timedelta(days=i)
-        pdf = out / "pages" / f"{day.strftime('%Y-%m-%d')}.pdf"
-        render_dashboard_image(tasks=tasks, live=True, weather={"name": city_name} if city_name else None, now=day, pen_weather=True).save(pdf, "PDF", resolution=226.0)
-        first = first or pdf
-    return first
+        page = render_dashboard_image(tasks=tasks, live=True, weather={"name": city_name} if city_name else None, now=day, pen_weather=True)
+        page.convert("L").save(out / "pages" / f"{day.strftime('%Y-%m-%d')}.jpg", "JPEG", quality=85)
 
 
-def dash_pen_profile(pen_name):
-    """How to fill glyphs for the pen selected on the dashboard page (its .content LastPen): the pencil
-    lays a wide soft line, so runs 10 px apart at full pressure are solid and small text wants less
-    pressure; every other pen is a thin opaque line, so runs 4 px apart at full pressure everywhere."""
-    if "pencil" in (pen_name or "").lower():
-        return {"pitch": 10, "pitch_small": 5, "pressure": 4000, "pressure_small": 2200}
-    return {"pitch": 4, "pitch_small": 3, "pressure": 4000, "pressure_small": 4000}
+def glyph_centerlines(ch, size, bold=True):
+    """Single-line version of a glyph of the dashboard font: the glyph is rendered, thinned to its
+    centreline (Zhang-Suen) and traced into polylines, in px relative to the text origin like
+    text_strokes(). A thick pen along these lines gives a bold digit in one or two strokes."""
+    from PIL import Image, ImageDraw
+    ref = 120                                     # thinned once at this size, scaled to `size`
+    font = get_font(ref, bold=bold)
+    left, top, right, bottom = font.getbbox(ch)
+    pad = 2
+    w, h = right + 2 * pad, bottom + 2 * pad
+    img = Image.new("L", (w, h), 255)
+    ImageDraw.Draw(img).text((pad, pad), ch, font=font, fill=0)
+    px = img.load()
+    on = [[1 if px[x, y] < 128 else 0 for x in range(w)] for y in range(h)]
+
+    def nb(x, y):   # P2..P9 clockwise from north
+        return [on[y - 1][x], on[y - 1][x + 1], on[y][x + 1], on[y + 1][x + 1], on[y + 1][x], on[y + 1][x - 1], on[y][x - 1], on[y - 1][x - 1]]
+
+    changed = True
+    while changed:
+        changed = False
+        for step in (0, 1):
+            kill = []
+            for y in range(1, h - 1):
+                for x in range(1, w - 1):
+                    if not on[y][x]:
+                        continue
+                    p = nb(x, y)
+                    b = sum(p)
+                    if b < 2 or b > 6:
+                        continue
+                    a = sum(1 for i in range(8) if p[i] == 0 and p[(i + 1) % 8] == 1)
+                    if a != 1:
+                        continue
+                    if step == 0 and (p[0] * p[2] * p[4] or p[2] * p[4] * p[6]):
+                        continue
+                    if step == 1 and (p[0] * p[2] * p[6] or p[0] * p[4] * p[6]):
+                        continue
+                    kill.append((x, y))
+            for x, y in kill:
+                on[y][x] = 0
+            changed = changed or bool(kill)
+
+    pts = {(x, y) for y in range(1, h - 1) for x in range(1, w - 1) if on[y][x]}
+    def adj(p):
+        x, y = p
+        return [(x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx or dy) and (x + dx, y + dy) in pts]
+    def crossings(p):   # 0->1 transitions around the pixel: 1 endpoint, 2 path, 3+ junction
+        x, y = p
+        ring = [(x, y - 1), (x + 1, y - 1), (x + 1, y), (x + 1, y + 1), (x, y + 1), (x - 1, y + 1), (x - 1, y), (x - 1, y - 1)]
+        v = [1 if q in pts else 0 for q in ring]
+        return sum(1 for i in range(8) if v[i] == 0 and v[(i + 1) % 8] == 1)
+    nodes = {p for p in pts if crossings(p) != 2}
+    visited = set()
+    paths = []
+    def walk(start, nxt):
+        path = [start, nxt]
+        visited.add(nxt)
+        while nxt not in nodes:
+            cand = [q for q in adj(nxt) if q not in visited and q not in path[-3:]]
+            if not cand:
+                break
+            cand.sort(key=lambda q: abs(q[0] - nxt[0]) + abs(q[1] - nxt[1]))   # 4-neighbours first
+            nxt = cand[0]; visited.add(nxt); path.append(nxt)
+        return path
+    for n in sorted(nodes):
+        visited.add(n)
+        for q in adj(n):
+            if q in visited and q not in nodes:
+                continue
+            if q not in visited or (q in nodes and (q, n) not in {(p[-1], p[0]) for p in paths}):
+                paths.append(walk(n, q))
+    for p in sorted(pts - visited):   # closed loops without any junction, e.g. "0"
+        if p in visited:
+            continue
+        path = [p]; visited.add(p); cur = p
+        while True:
+            cand = [q for q in adj(cur) if q not in visited]
+            if not cand:
+                break
+            cand.sort(key=lambda q: abs(q[0] - cur[0]) + abs(q[1] - cur[1]))
+            cur = cand[0]; visited.add(cur); path.append(cur)
+        if len(path) > 2:
+            paths.append(path + [path[0]])
+    for p in sorted(pts):   # dots (".", ":") thin down to single pixels: a stroke of no length
+        if not adj(p):
+            paths.append([p, (p[0] + 1, p[1])])
+    # spurs: short branches from a junction to a loose end, left by thinning at corners; then join
+    # paths that meet end to end so a glyph is as few strokes as possible
+    endpoints = {p for p in pts if crossings(p) == 1}
+    junctions = {p for p in pts if crossings(p) >= 3}
+    def spur(p):
+        return len(p) < ref * 0.12 and ((p[0] in endpoints and p[-1] in junctions) or (p[-1] in endpoints and p[0] in junctions))
+    paths = [p for p in paths if len(p) >= 2 and not spur(p)]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(paths)):
+            for j in range(len(paths)):
+                if i == j or paths[i][0] == paths[i][-1]:
+                    continue
+                a_, b_ = paths[i], paths[j]
+                if a_[-1] == b_[0]:
+                    paths[i] = a_ + b_[1:]; del paths[j]; merged = True; break
+                if a_[-1] == b_[-1]:
+                    paths[i] = a_ + b_[-2::-1]; del paths[j]; merged = True; break
+                if a_[0] == b_[-1]:
+                    paths[i] = b_ + a_[1:]; del paths[j]; merged = True; break
+            if merged:
+                break
+    def simplify(path, tol=1.2):
+        if len(path) < 3:
+            return path
+        if path[0] == path[-1]:   # a loop: split at the point farthest from the start, simplify both halves
+            m = max(range(1, len(path) - 1), key=lambda i: (path[i][0] - path[0][0]) ** 2 + (path[i][1] - path[0][1]) ** 2)
+            return simplify(path[:m + 1], tol) + simplify(path[m:], tol)[1:]
+        (x0, y0), (x1, y1) = path[0], path[-1]
+        dmax, idx = 0, 0
+        for i in range(1, len(path) - 1):
+            x, y = path[i]
+            d = abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / (math.hypot(x1 - x0, y1 - y0) or 1)
+            if d > dmax:
+                dmax, idx = d, i
+        if dmax > tol:
+            return simplify(path[:idx + 1], tol)[:-1] + simplify(path[idx:], tol)
+        return [path[0], path[-1]]
+    k = size / ref
+    return [[((x - pad) * k, (y - pad) * k) for x, y in simplify(p)] for p in paths]
 
 
-def bake_dash_app(out, profile):
-    """Bake glyphs (one file per glyph and size), zone sweeps and the usage bars for app/rmdash.c, plus
-    the `layout` and `glyphs` tables it reads."""
+def bake_dash_app(out):
+    """Bake glyphs (one file per glyph and size, single-line), zone sweeps and the usage bars for
+    app/rmdash.c, plus the `layout` and `glyphs` tables it reads."""
     rec = StrokeRecorder()
-    pitch, small_pitch = profile["pitch"], profile["pitch_small"]
-    pressure, small = profile["pressure"], profile["pressure_small"]
     gx, gy = GLYPH_BASE
     lines = []
     for size, chars in GLYPH_SETS.items():
@@ -1677,16 +1792,15 @@ def bake_dash_app(out, profile):
             lines.append(f"{size} {ord(ch)} {font.getlength(ch):.2f}")
             if ch == " ":
                 continue
-            for path in text_strokes(ch, size, gx, gy, pitch if size >= 96 else small_pitch):
-                rec.stroke(path, pressure=pressure if size >= 96 else small)
+            for path in glyph_centerlines(ch, size):
+                rec.stroke([(gx + x, gy + y) for x, y in path], pressure=4000)
             (out / f"g{size}_{ord(ch)}.bin").write_bytes(rec.take())
     (out / "glyphs").write_text("\n".join(lines) + "\n")
     for name, zone in TABLET_DASH_LAYOUT["zones"].items():
         rec.stroke(sweep_path(*zone), is_eraser=True, pressure=4000)
         (out / f"sweep_{name}.bin").write_bytes(rec.take())
-
     for i, (x0, x1, y) in enumerate(TABLET_DASH_LAYOUT["bars"]):
-        rec.stroke([(x0, y), (x1, y)], pressure=pressure)
+        rec.stroke([(x0, y), (x1, y)], pressure=4000)
         (out / f"bar{i}.bin").write_bytes(rec.take())
     layout = [f"base {gx} {gy}"]
     layout += [f"zone {n} {x0} {y0} {x1} {y1}" for n, (x0, y0, x1, y1) in TABLET_DASH_LAYOUT["zones"].items()]
@@ -1738,25 +1852,28 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
     run_ssh("systemctl stop rmdash 2>/dev/null; true", host=host)   # never push (the app restarts) under a running program
     existing = next((nb["uuid"] for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
     stock = Path(tempfile.mkdtemp())
-    today_pdf = render_dash_pages(stock, loc.get("name", ""), tasks)
+    render_dash_pages(stock, loc.get("name", ""), tasks)
     if no_push and existing:
         doc_uuid = existing
         print(f"📄 Keeping the '{doc_title}' page already on the tablet (no push, no reload)", flush=True)
     else:
+        today_pdf = stock / "today.pdf"
+        render_dashboard_image(tasks=tasks, live=True, weather=weather).save(today_pdf, "PDF", resolution=226.0)
         print(f"📄 Pushing the '{doc_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
         doc_uuid = cmd_push(argparse.Namespace(file=str(today_pdf), folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
     content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
     pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
     page_id = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
     pen = (content.get("extraMetadata") or {}).get("LastPen", "")
-    print(f"🖊️  Baking the fill for the pen selected on the page: {pen or 'unknown, assuming a thin pen'}", flush=True)
+    if pen and "marker" not in pen.lower():
+        print(f"🖊️  The page's pen is {pen}: the single-line digits look best with the Marker, select it on that page", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
-        bake_dash_app(out, dash_pen_profile(pen))
+        bake_dash_app(out)
         shutil.move(str(stock / "pages"), str(out / "pages"))
         shutil.rmtree(stock, ignore_errors=True)
         if not (no_push and existing):
-            (out / "printed").write_text(datetime.now().strftime("%Y-%m-%d"))   # else the tablet keeps its own
+            (out / "printed").write_text(f"{datetime.now().strftime('%Y-%m-%d')} {int(time.time())}\n")   # else the tablet keeps its own
         (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\npdf={REMOTE_PATH}/{doc_uuid}.pdf\n"
                                     f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=15\n")
         if token:
@@ -2256,12 +2373,12 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     # 5. Right Column: weather (when a city is set), then priorities, then ruled notes (only without weather)
     y_task = 490
-    if pen_weather:
+    if pen_weather:   # the tablet prints the weather block itself (app/rmdash.c), same rows and sizes as below
         draw.text((630, 425), f"WEATHER  •  {(weather or {}).get('name', '').upper()}".rstrip(" •"), font=f_sec, fill=0)
         draw.line([(630, 465), (1324, 465)], fill=0, width=2)
-        draw.text((630, 980), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
-        draw.line([(630, 1020), (1324, 1020)], fill=0, width=2)
-        y_task = 1045
+        draw.text((630, 885), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
+        draw.line([(630, 925), (1324, 925)], fill=0, width=2)
+        y_task = 950
     elif weather and "days" in weather:
         today, coming = weather["days"][0], weather["days"][1:6]
         draw.text((630, 425), f"WEATHER  •  {weather['name'].upper()}", font=f_sec, fill=0)
