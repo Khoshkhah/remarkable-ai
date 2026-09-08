@@ -203,6 +203,7 @@ Turn your reMarkable 2 into a dedicated minimalist executive desk display:
 `remarkable-ai` provides direct hardware event injection into `/dev/input/event1` (`Wacom I2C Digitizer`):
 
 - **Real-Time Drawing**: Emulates physical stylus pressure, coordinates, and contact directly into the Linux input subsystem. The active page renders strokes instantly with zero page reload or tablet restart.
+- **Paced Like a Real Pen**: xochitl smooths and predicts pen motion over time, so events are sent one frame every few milliseconds with a short hover before touch-down and a pause when switching between pen and eraser. Bursting a whole stroke at once stretches it and turns eraser strokes into pen lines.
 - **7-Segment Minimal-Delta State Machine**: When running the digital clock, each digit is broken down into 7 discrete physical segments (A through G). On every second tick, only the segments that change state are toggled (virtual pen to turn on, virtual eraser to turn off).
 - **Zero Screen Churn**: Segments that remain unchanged are never touched, achieving the absolute mathematical minimum number of changes per second on the e-ink screen.
 

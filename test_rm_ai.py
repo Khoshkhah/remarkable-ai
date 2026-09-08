@@ -1,0 +1,54 @@
+"""Smallest checks that fail if stylus pacing or the 7-segment geometry regresses.  Run: python3 test_rm_ai.py"""
+import io
+import struct
+
+import rm_ai
+
+
+class FakeProc:
+    def __init__(self):
+        self.stdin = io.BytesIO()
+
+
+def events(buf):
+    return [struct.unpack("<IIHHi", buf[i:i + 16])[2:] for i in range(0, len(buf), 16)]
+
+
+def test_stroke_is_resampled_hovered_and_lifted():
+    st = rm_ai.VirtualStylus.__new__(rm_ai.VirtualStylus)
+    st.proc, st.tool, st.FRAME_DT = FakeProc(), None, 0
+    st.stroke([(100, 100), (500, 100)], is_eraser=False, pressure=2500)
+    evs = events(st.proc.stdin.getvalue())
+    xs = [v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y]  # ABS_Y is the horizontal axis
+    assert len(xs) == 101 and xs == sorted(xs)                              # 400px / STEP_PX + start point
+    assert max(b - a for a, b in zip(xs, xs[1:])) <= rm_ai.VirtualStylus.STEP_PX * 15725 / 1404 + 1
+    assert evs.count((rm_ai.EV_SYN, rm_ai.SYN_REPORT, 0)) == len(xs) + 9   # one frame per point + 9 for hover/touch/hold/lift
+    assert evs.index((rm_ai.EV_KEY, rm_ai.BTN_TOUCH, 1)) > evs.index((rm_ai.EV_ABS, rm_ai.ABS_DISTANCE, 10))
+    assert evs[-2] == (rm_ai.EV_KEY, rm_ai.BTN_TOOL_PEN, 0)
+
+
+def test_erasing_a_segment_never_touches_its_neighbours():
+    PEN_R, ERASER_R = 6, 8.5  # ballpoint 2 at ~2500 pressure and eraser size 2, measured on an rM2
+
+    def footprint(path, r):  # bounding box of the path swept by a disc of radius r
+        xs = [p[0] for p in path]; ys = [p[1] for p in path]
+        return min(xs) - r, min(ys) - r, max(xs) + r, max(ys) + r
+
+    def disjoint(a, b):
+        return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+
+    for w, h in [(50, 90), (75, 140), (95, 175), (120, 220)]:
+        d = rm_ai.SevenSegmentDigit(None, 100, 100, w, h)
+        for seg, erase in d.erase_coords.items():
+            e = footprint(erase, ERASER_R)
+            own = footprint(d.draw_coords[seg], PEN_R)
+            assert e[0] <= own[0] and e[1] <= own[1] and e[2] >= own[2] and e[3] >= own[3], (w, h, seg)
+            for other, draw in d.draw_coords.items():
+                if other != seg:
+                    assert disjoint(e, footprint(draw, PEN_R)), (w, h, seg, other)
+
+
+if __name__ == "__main__":
+    test_stroke_is_resampled_hovered_and_lifted()
+    test_erasing_a_segment_never_touches_its_neighbours()
+    print("ok")
