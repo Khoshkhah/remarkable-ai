@@ -1654,12 +1654,21 @@ def render_dash_pages(out, city_name, tasks, days=DASH_STOCK_DAYS):
     return first
 
 
-def bake_dash_app(out, pen_width, ink_width, pressure):
-    """Bake glyphs (one file per glyph and size), zone sweeps, usage bars and the calendar ring for
-    app/rmdash.c, plus the `layout` and `glyphs` tables it reads."""
+def dash_pen_profile(pen_name):
+    """How to fill glyphs for the pen selected on the dashboard page (its .content LastPen): the pencil
+    lays a wide soft line, so runs 10 px apart at full pressure are solid and small text wants less
+    pressure; every other pen is a thin opaque line, so runs 4 px apart at full pressure everywhere."""
+    if "pencil" in (pen_name or "").lower():
+        return {"pitch": 10, "pitch_small": 5, "pressure": 4000, "pressure_small": 2200}
+    return {"pitch": 4, "pitch_small": 3, "pressure": 4000, "pressure_small": 4000}
+
+
+def bake_dash_app(out, profile):
+    """Bake glyphs (one file per glyph and size), zone sweeps, one-digit column sweeps for the clock and
+    the usage bars for app/rmdash.c, plus the `layout` and `glyphs` tables it reads."""
     rec = StrokeRecorder()
-    pitch = max(6, int(ink_width or pen_width) // 7)
-    small = max(800, int(pressure * 0.55))      # thinner pencil line for text under ~50 px, as the live page uses
+    pitch, small_pitch = profile["pitch"], profile["pitch_small"]
+    pressure, small = profile["pressure"], profile["pressure_small"]
     gx, gy = GLYPH_BASE
     lines = []
     for size, chars in GLYPH_SETS.items():
@@ -1668,13 +1677,20 @@ def bake_dash_app(out, pen_width, ink_width, pressure):
             lines.append(f"{size} {ord(ch)} {font.getlength(ch):.2f}")
             if ch == " ":
                 continue
-            for path in text_strokes(ch, size, gx, gy, pitch if size >= 96 else max(4, pitch // 2)):
+            for path in text_strokes(ch, size, gx, gy, pitch if size >= 96 else small_pitch):
                 rec.stroke(path, pressure=pressure if size >= 96 else small)
             (out / f"g{size}_{ord(ch)}.bin").write_bytes(rec.take())
     (out / "glyphs").write_text("\n".join(lines) + "\n")
     for name, zone in TABLET_DASH_LAYOUT["zones"].items():
         rec.stroke(sweep_path(*zone), is_eraser=True, pressure=4000)
         (out / f"sweep_{name}.bin").write_bytes(rec.take())
+    # the clock changes one digit at a time: a sweep as wide as one digit of the clock font, baked at the
+    # glyph base so rmdash can shift it under any digit position (digits share one advance width)
+    size, _, _ = TABLET_DASH_LAYOUT["texts"]["clock"]
+    adv = get_font(size, bold=True).getlength("0")
+    _, y0, _, y1 = TABLET_DASH_LAYOUT["zones"]["clock"]
+    rec.stroke(sweep_path(gx, y0, gx + adv - 2, y1), is_eraser=True, pressure=4000)
+    (out / f"sweep_col{size}.bin").write_bytes(rec.take())
     for i, (x0, x1, y) in enumerate(TABLET_DASH_LAYOUT["bars"]):
         rec.stroke([(x0, y), (x1, y)], pressure=pressure)
         (out / f"bar{i}.bin").write_bytes(rec.take())
@@ -1738,10 +1754,11 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
     content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
     pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
     page_id = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
-    saved = cfg.get("clock_defaults", {})
+    pen = (content.get("extraMetadata") or {}).get("LastPen", "")
+    print(f"🖊️  Baking the fill for the pen selected on the page: {pen or 'unknown, assuming a thin pen'}", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
-        bake_dash_app(out, saved.get("pen_width", 12), saved.get("ink_width", 70), saved.get("pressure", 4000))
+        bake_dash_app(out, dash_pen_profile(pen))
         shutil.move(str(stock / "pages"), str(out / "pages"))
         shutil.rmtree(stock, ignore_errors=True)
         (out / "printed").write_text(datetime.now().strftime("%Y-%m-%d") if not (no_push and existing) else "unknown")

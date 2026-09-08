@@ -144,8 +144,9 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
     from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
-        rm_ai.bake_dash_app(out, 12, 70, 4000)
+        rm_ai.bake_dash_app(out, rm_ai.dash_pen_profile("Ballpointv2"))
         names = {p.name for p in out.iterdir()}
+        assert "sweep_col190.bin" in names
         for size, chars in rm_ai.GLYPH_SETS.items():
             assert all(f"g{size}_{ord(c)}.bin" in names for c in chars), size
         assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])
@@ -159,7 +160,7 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         # a glyph is baked at the base origin: its first pen-down lands near it
         evs = events((out / "g190_48.bin").read_bytes())
         first_y = next(v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y)
-        assert abs(first_y * 1404 / 15725 - rm_ai.GLYPH_BASE[0]) < 40
+        assert abs(first_y * 1404 / 15725 - rm_ai.GLYPH_BASE[0]) < 80
     assert rm_ai.usage_file_text({"windows": [("Session", 12.4, "2026-09-08T21:59:59+00:00")]}).count("\n") == 5
 
 

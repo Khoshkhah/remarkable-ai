@@ -313,6 +313,26 @@ static void swap_daily_page(void) {
     if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
 }
 
+/* The clock changes one digit at a time: erase and redraw only the digits that differ, each under a
+ * one-digit-wide sweep shifted into place (digits share one advance width, so positions never move).
+ * Returns 0 when that is not possible (nothing shown yet, or no column sweep baked) and the whole
+ * zone is to be redone. */
+static int update_clock(const char *shown, const char *want) {
+    struct text *t = T("clock"); if (!t || !shown[0] || strlen(shown) != strlen(want)) return 0;
+    char name[32]; snprintf(name, sizeof name, "sweep_col%d.bin", t->size);
+    char path[600]; snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (access(path, R_OK)) return 0;
+    int i; for (i = 0; i < ngl && gl[i].size != t->size; i++);
+    if (i == ngl) return 0;
+    double x = t->x; int changed[16] = {0}, any = 0; double xs[16];
+    for (int k = 0; want[k] && k < 16; k++) { xs[k] = x; changed[k] = want[k] != shown[k]; any |= changed[k]; x += gl[i].adv[(unsigned char)want[k]]; }
+    if (!any) return 1;
+    for (int k = 0; want[k] && k < 16; k++) if (changed[k]) { stroke_file(name, 1, (int)lround(xs[k]) - base_x, 0, -1); if (page_lost) return 1; }
+    hover(START_SETTLE_US);
+    for (int k = 0; want[k] && k < 16; k++) if (changed[k]) { char g[32]; snprintf(g, sizeof g, "g%d_%d.bin", t->size, (unsigned char)want[k]); stroke_file(g, 0, (int)lround(xs[k]) - base_x, t->y - base_y, -1); if (page_lost) return 1; }
+    return 1;
+}
+
 static void save_state(char shown[NZ][512], long rm_mtime) {
     char path[600]; snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "w"); if (!f) return;
@@ -385,6 +405,11 @@ int main(int argc, char **argv) {
         want_all(want, &lt);
         int changed[NZ], any = 0; char name[32];
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
+        if (changed[0] && update_clock(shown[0], want[0])) {   /* digit by digit; the other zones follow below */
+            if (page_lost) continue;
+            strcpy(shown[0], want[0]); fprintf(stderr, "clock: %s\n", want[0]);
+            changed[0] = 0; any = 0; for (int z = 1; z < NZ; z++) any |= changed[z];
+        }
         for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
         if (page_lost) continue;
         if (any) hover(START_SETTLE_US);
