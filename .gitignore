@@ -14,3 +14,6 @@ sample_handwriting.png
 
 # Secrets
 .env
+
+# rm-ai chat output (rendered messages, web page)
+chat/

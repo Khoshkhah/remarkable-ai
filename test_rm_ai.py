@@ -104,9 +104,26 @@ def test_weather_summary_from_the_open_meteo_shape():
     assert w["days"][1] == {"dow": "WED", "text": "Light rain", "max": 15.0, "min": 8.0, "pop": 70, "sunrise": "06:14", "sunset": "19:32"}
 
 
+def test_box_detection_accepts_rectangles_and_rejects_lines_and_loops():
+    import math
+    def rect(x, y, w, h, wobble=0):
+        pts = [(x + w * i / 20, y) for i in range(21)] + [(x + w, y + h * i / 20) for i in range(21)]
+        pts += [(x + w - w * i / 20, y + h) for i in range(21)] + [(x, y + h - h * i / 20) for i in range(21)]
+        return [(px + wobble * math.sin(i), py + wobble * math.cos(i)) for i, (px, py) in enumerate(pts)]
+    assert rm_ai.is_box(rect(100, 100, 300, 120))
+    assert rm_ai.is_box(rect(100, 100, 300, 120, wobble=6))            # hand-drawn wobble
+    assert not rm_ai.is_box([(100 + 5 * i, 100) for i in range(60)])    # a line
+    circle = [(300 + 150 * math.cos(t / 40 * 2 * math.pi), 200 + 100 * math.sin(t / 40 * 2 * math.pi)) for t in range(41)]
+    assert rm_ai.is_box(circle)                                         # an oval around text counts too
+    assert not rm_ai.is_box(rect(100, 100, 300, 120)[:60])              # an open three-sided shape
+    assert not rm_ai.is_box(rect(100, 100, 300, 120) * 3)               # a triple scribble around it
+    assert rm_ai.inside((300, 200), circle) and not rm_ai.inside((100, 100), circle)
+
+
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
     test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours()
     test_claude_usage_summary_from_the_documented_report_shapes()
     test_weather_summary_from_the_open_meteo_shape()
+    test_box_detection_accepts_rectangles_and_rejects_lines_and_loops()
     print("ok")

@@ -740,6 +740,8 @@ def cmd_push(args):
     if temp_dir:
         temp_dir.cleanup()
 
+    if getattr(args, "fresh", False):   # drop the pen layer: strokes drawn on an earlier version of this page
+        run_ssh(f"rm -f {REMOTE_PATH}/{doc_uuid}/*.rm", host=target_host)
     print("🔄 Refreshing tablet library...")
     run_ssh("systemctl restart xochitl", host=target_host)
     folder_msg = f" in folder '{folder_name}'" if folder_name else ""
@@ -874,6 +876,12 @@ ABS_DISTANCE = 25
 ABS_TILT_X = 26
 ABS_TILT_Y = 27
 
+# Streams the digitizer, and exits by itself when the SSH connection that started it closes: the
+# first cat streams, the second blocks on stdin until the client is gone, then the streamer is killed.
+# (Killing a plain remote `cat` by name would also kill every other reader on the tablet.)
+READER_CMD = "cat /dev/input/event1 & p=$!; cat >/dev/null; kill $p"
+
+
 class VirtualStylus:
     """Emulates real-time stylus input on reMarkable 2 Wacom I2C Digitizer (/dev/input/event1).
 
@@ -906,7 +914,7 @@ class VirtualStylus:
             return
         cmd = ["ssh"] + get_ssh_base_opts() + [self.host, "dd of=/dev/input/event1 bs=16 2>/dev/null"]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-        self.reader = subprocess.Popen(["ssh"] + get_ssh_base_opts() + [self.host, "cat /dev/input/event1"], stdout=subprocess.PIPE)
+        self.reader = subprocess.Popen(["ssh"] + get_ssh_base_opts() + [self.host, READER_CMD], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         import threading
         threading.Thread(target=self._watch_pen, daemon=True).start()
         self._lift_everything()
@@ -921,10 +929,8 @@ class VirtualStylus:
                 pass
             self.proc = None
         if self.reader:
-            self.reader.kill()
+            self.reader.kill()      # closing our end of the connection makes the remote reader kill itself
             self.reader = None
-            # the remote `cat` only dies on its next write, which may be never: stop it explicitly
-            subprocess.run(["ssh"] + get_ssh_base_opts() + [self.host, "kill $(pgrep -f '^cat /dev/input/event1') 2>/dev/null"], capture_output=True)
 
     def _watch_pen(self):
         """Every event on the digitizer that is not an echo of one we injected is the real pen: while it
@@ -1737,7 +1743,7 @@ def fetch_weather(city):
         return {"error": str(e)[:80]}
 
 
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None):
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False):
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
@@ -1762,9 +1768,14 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     if live:
         # the live page leaves the top blank: the pen draws HH:MM there and updates it every minute
         draw.text((80, 325), now.strftime("%A, %B %d, %Y").upper(), font=get_font(38, bold=True), fill=0)
+    elif clock:
+        # a pushed document: the big time is the time of the push (it cannot tick), date below it
+        time_str = now.strftime("%I:%M %p").lstrip("0") if time_format == "12h" else now.strftime("%H:%M")
+        draw.text((80, 115), time_str, font=get_font(190, bold=True), fill=0)
+        draw.text((80, 325), now.strftime("%A, %B %d, %Y").upper(), font=get_font(38, bold=True), fill=0)
     else:
-        # a sleep screen or a pushed page cannot tick, so no clock: the date takes the space instead
-        # (the footer's "Updated" stamp says when it was rendered)
+        # the sleep screen is painted once when the tablet falls asleep, so no clock: the date takes
+        # the space instead (the footer's "Updated" stamp says when it was rendered)
         draw.text((80, 120), now.strftime("%A").upper(), font=get_font(110, bold=True), fill=0)
         draw.text((80, 260), now.strftime("%B %d, %Y").upper(), font=get_font(64, bold=True), fill=0)
     draw.line([(80, 395), (1324, 395)], fill=0, width=4)
@@ -1930,8 +1941,8 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
         draw.line([(630, y_task + 55), (1324, y_task + 55)], fill=220, width=1)
         y_task += 75
 
-    if not (weather and "days" in weather):
-        # Handwriting & Quick Notes ruled section
+    if notes and not live:
+        # Handwriting & Quick Notes ruled section: only on a page that can be written on
         y_notes = y_task + 35
         draw.text((630, y_notes), "HANDWRITING & QUICK NOTES", font=get_font(24, bold=True), fill=0)
         draw.line([(630, y_notes + 35), (1324, y_notes + 35)], fill=0, width=2)
@@ -2035,7 +2046,7 @@ def run_live_dashboard(host, usage_minutes, repush=None):
                 # wait for a fresh lastOpened only briefly, then carry on
                 wait_for_open(host, doc_uuid, pushed_at, timeout=90)
                 stylus.connect()
-                shown = None
+                shown, rows_shown = None, [None, None, None]   # the fresh page has no strokes: redraw all
             time_str = datetime.now().strftime("%H:%M")
             changed_rows = []
             if time.time() - last_usage >= usage_minutes * 60:
@@ -2080,6 +2091,174 @@ def run_live_dashboard(host, usage_minutes, repush=None):
         print("\nLive dashboard stopped.", flush=True)
     finally:
         stylus.close()
+
+
+# ==============================================================================
+# Chat on the page: read the real pen live, a box around handwriting means "sent"
+# ==============================================================================
+
+def digitizer_to_display(abs_x, abs_y):
+    """Inverse of VirtualStylus.display_to_digitizer."""
+    return abs_y * 1404 / 15725, 1872 - abs_x * 1872 / 20966
+
+
+class PenReader:
+    """Streams the tablet's digitizer and hands every finished real-pen stroke, as display-coordinate
+    points, to `on_stroke`. Eraser strokes are dropped."""
+
+    def __init__(self, host, on_stroke):
+        self.host, self.on_stroke = host, on_stroke
+        self.proc = None
+
+    def run(self):
+        self.proc = subprocess.Popen(["ssh"] + get_ssh_base_opts() + [self.host, READER_CMD], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        x = y = 0
+        touching, eraser, pts = False, False, []
+        try:
+            while True:
+                ev = self.proc.stdout.read(16)
+                if len(ev) < 16:
+                    break
+                _, _, ev_type, code, value = struct.unpack("<IIHHi", ev)
+                if ev_type == EV_ABS and code == ABS_X:
+                    x = value
+                elif ev_type == EV_ABS and code == ABS_Y:
+                    y = value
+                elif ev_type == EV_KEY and code == BTN_TOOL_RUBBER:
+                    eraser = bool(value)
+                elif ev_type == EV_KEY and code == BTN_TOUCH:
+                    if value and not touching:
+                        pts = []
+                    elif not value and touching and len(pts) > 1 and not eraser:
+                        self.on_stroke(pts)
+                    touching = bool(value)
+                elif ev_type == EV_SYN and touching:
+                    pts.append(digitizer_to_display(x, y))
+        finally:
+            self.close()
+
+    def close(self):
+        if self.proc:
+            self.proc.kill()      # the remote reader kills itself when the connection closes
+            self.proc = None
+
+
+def is_box(pts):
+    """A closed loop big enough to surround a message: a rectangle, a rounded box or an oval drawn
+    around handwriting all count. Open shapes and scribbles do not."""
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    w, h = max(xs) - min(xs), max(ys) - min(ys)
+    if w < 80 or h < 40:
+        return False
+    if math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > max(40, 0.2 * math.hypot(w, h)):
+        return False   # not closed
+    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+    return 0.6 <= length / (2 * (w + h)) <= 1.6   # one lap around, not a scribble or a double loop
+
+
+def inside(pt, loop):
+    """Point-in-polygon (ray casting) so an oval selects only what is really inside it."""
+    x, y = pt
+    hit = False
+    for (ax, ay), (bx, by) in zip(loop, loop[1:] + loop[:1]):
+        if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+            hit = not hit
+    return hit
+
+
+def render_strokes(strokes, box, path, scale=2):
+    """Draw `strokes` (inside `box` = (x0, y0, x1, y1)) into a PNG at `path`."""
+    from PIL import Image, ImageDraw
+    x0, y0, x1, y1 = box
+    pad = 20
+    im = Image.new("L", (int((x1 - x0 + 2 * pad) * scale), int((y1 - y0 + 2 * pad) * scale)), 255)
+    d = ImageDraw.Draw(im)
+    for pts in strokes:
+        line = [((px - x0 + pad) * scale, (py - y0 + pad) * scale) for px, py in pts]
+        if len(line) > 1:
+            d.line(line, fill=0, width=3 * scale, joint="curve")
+    im.save(path)
+
+
+CHAT_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable chat</title>
+<style>body{font-family:sans-serif;max-width:900px;margin:2em auto;background:#f4f4f4}
+.box{background:#fff;border:1px solid #ccc;border-radius:8px;padding:1em;margin:1em 0}
+.box img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em}</style>
+<h1>reMarkable chat <span class="meta" id="n"></span></h1><div id="list"></div>
+<script>
+let shown = '';
+async function poll(){
+  try{ const r = await fetch('boxes.json?'+Date.now()); const boxes = await r.json();
+    const sig = boxes.length + ':' + (boxes.length ? boxes[boxes.length-1].n + '/' + boxes[boxes.length-1].time + '/' + (boxes[boxes.length-1].reply||'') : '');
+    if(sig !== shown){ shown = sig;
+      document.getElementById('n').textContent = boxes.length + ' message' + (boxes.length==1?'':'s');
+      document.getElementById('list').innerHTML = boxes.slice().reverse().map(b =>
+        `<div class="box"><div class="meta">#${b.n} · ${b.time} · ${b.strokes} strokes · box ${b.box.map(Math.round).join(',')}</div>
+         <img src="${b.image}?${Date.now()}">${b.text ? '<p><b>Read:</b> '+b.text+'</p>' : ''}${b.reply ? '<p><b>Reply:</b> '+b.reply+'</p>' : ''}</div>`).join(''); }
+  }catch(e){}
+  setTimeout(poll, 2000); }
+poll();
+</script>"""
+
+
+def cmd_chat(args):
+    """Stage 1: detect boxed handwriting live and show it on a local web page; nothing is written back."""
+    import http.server
+    import threading
+    host = get_active_host(getattr(args, "device", None))
+    out = Path(args.dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "index.html").write_text(CHAT_PAGE)
+    boxes_file = out / "boxes.json"
+    boxes = json.loads(boxes_file.read_text()) if boxes_file.exists() else []
+    strokes = []   # real-pen strokes seen so far that no box has claimed yet
+
+    def on_stroke(pts):
+        if not is_box(pts):
+            strokes.append(pts)
+            note = ""
+            if len(pts) > 150:   # a long stroke that was not taken as a loop: say why
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                w, h = max(xs) - min(xs), max(ys) - min(ys)
+                gap = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+                length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+                note = f"  [not a loop: {round(w)}x{round(h)}, start-end gap {round(gap)}px, length/perimeter {length / (2 * (w + h)):.2f}]"
+            print(f"· stroke ({len(pts)} pts), {len(strokes)} unsent{note}", flush=True)
+            return
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        box = (min(xs), min(ys), max(xs), max(ys))
+        loop = pts[::max(1, len(pts) // 200)]   # a few hundred vertices are plenty for the containment test
+        content = [s for s in strokes if sum(1 for q in s if inside(q, loop)) >= 0.6 * len(s)]
+        if not content:
+            print("▢ loop with nothing inside, ignored", flush=True)
+            return
+        for s in content:
+            strokes.remove(s)
+        n = len(boxes) + 1
+        image = f"box-{n}.png"
+        render_strokes(content, box, out / image)
+        boxes.append({"n": n, "time": datetime.now().strftime("%H:%M:%S"), "box": box, "strokes": len(content), "image": image})
+        boxes_file.write_text(json.dumps(boxes, indent=1))
+        print(f"✉️  message #{n}: {len(content)} strokes in a {round(box[2]-box[0])}x{round(box[3]-box[1])} loop -> {out / image}", flush=True)
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(out), **k)
+        def log_message(self, *a):
+            pass
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"🌐 http://localhost:{args.port}  —  write on the page, then draw a box around it; Ctrl+C to stop", flush=True)
+    reader = PenReader(host, on_stroke)
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        reader.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reader.close()
+        server.shutdown()
 
 
 def cmd_dashboard(args):
@@ -2174,7 +2353,7 @@ def cmd_dashboard(args):
 
     # Render image
     im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format,
-                                claude_usage=claude_usage, subscription=subscription, weather=weather)
+                                claude_usage=claude_usage, subscription=subscription, weather=weather, notes=(mode == "doc"), clock=(mode == "doc"))
 
     save_path = getattr(args, "save", None)
 
@@ -2239,7 +2418,7 @@ def cmd_dashboard(args):
                 pdf = f.name
             page.save(pdf, "PDF", resolution=226.0)
             uuid_ = cmd_push(argparse.Namespace(file=pdf, folder=folder, title=title, force_new=False, margins=0,
-                                                device=getattr(args, "device", None)))
+                                                fresh=True, device=getattr(args, "device", None)))
             try:
                 os.unlink(pdf)
             except Exception:
@@ -2340,6 +2519,12 @@ def main():
     p_draw.add_argument("--eraser", action="store_true", help="Use virtual eraser instead of pen")
     p_draw.add_argument("--pressure", type=int, default=2500, help="Simulated pen pressure (0..4095)")
     p_draw.set_defaults(func=cmd_draw)
+
+    # chat
+    p_chat = subparsers.add_parser("chat", help="Chat on the page: box your handwriting to send it (stage 1: detect and show on a local web page)")
+    p_chat.add_argument("--dir", type=str, default="chat", help="Folder for the rendered messages and the web page (default ./chat)")
+    p_chat.add_argument("--port", type=int, default=8765, help="Local web page port (default 8765)")
+    p_chat.set_defaults(func=cmd_chat)
 
     # dashboard
     p_dash = subparsers.add_parser("dashboard", aliases=["dash"], help="Turn tablet into a dedicated fullscreen desk clock & productivity dashboard")
