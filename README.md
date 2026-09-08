@@ -14,7 +14,7 @@ Connect your reMarkable tablets wirelessly to **Claude, Gemini, and ChatGPT** ov
 - **Multi-Model Vision**: Works seamlessly with Anthropic Claude 3.7/3.5 Sonnet, Google Gemini 2.5/2.0, and OpenAI GPT-4o.
 - **Claude Code Slash Commands**: Use `/rm-read`, `/rm-tasks`, and `/rm-list` directly inside Claude Code.
 - **Antigravity / Gemini Skills**: Native Agent Skill ready for autonomous agent execution.
-- **Obsidian Ready**: Export notes and diagrams directly into Obsidian markdown vaults.
+- **Live e-ink dashboard and clock**: a sleep-screen dashboard with weather and Claude usage, and a clock drawn on the open page with the tablet's own pen.
 
 ## Quickstart Installation
 
@@ -155,22 +155,23 @@ rm-ai devices 2
 # Target specific tablet for a single command
 rm-ai --device rm-alt read
 
-# Dedicated Fullscreen Clock & Productivity Dashboard (0-Power Standby)
-rm-ai dashboard
-rm-ai dashboard --suspend
+# Sleep-screen dashboard: date, calendar, weather, Claude usage, battery (refreshes without touching the app)
+rm-ai dashboard --city Burnaby            # the city is remembered; add --suspend to see it right away
+rm-ai dashboard --restore                 # factory sleep screen back
 
-# Push interactive dashboard notebook for physical note-taking
-rm-ai dashboard --mode doc --title "Daily Dashboard"
+# Dashboard as a notebook page, kept live by the pen: HH:MM every minute, usage rows when they change
+rm-ai dashboard --mode doc --live         # pushes the page once (one reload), then draws on it
+rm-ai dashboard --mode doc --live --no-push   # reuse the page already open on the tablet
 
-# Show Claude API spend and tokens on the dashboard: export an Admin API key first
-export ANTHROPIC_ADMIN_KEY="sk-ant-admin..."   # Console > Settings > Admin keys (needs an organization)
+# Optional extras on the dashboard
+export ANTHROPIC_ADMIN_KEY="sk-ant-admin..."   # API spend/tokens line (Console > Settings > Admin keys; needs an organization)
 
-# Live 7-segment digital clock via Virtual Stylus (zero reload / zero restart)
-rm-ai clock --pos top-right
+# Live digital clock drawn on the open page with the virtual pen (no reload)
+rm-ai clock                               # your saved defaults (see --save-defaults)
 rm-ai clock --pos center --duration 60 --clear
-rm-ai clock --size large --thickness 24   # bold digits; the pen selected on the tablet is measured automatically (max thickness: small 12, medium 25, large 33, xlarge 45)
-rm-ai clock --pressure 4000               # press harder: widens pressure-sensitive pens like the ballpoint
-rm-ai clock --pos center --pressure 2500 --pen-width 32 --save-defaults   # make these the defaults for plain `rm-ai clock`
+rm-ai clock --thickness 28 --frame --interval 2
+rm-ai clock --pressure 4000               # the pencil gets darker and wider with pressure; the ballpoint 12 -> 17 px
+rm-ai clock --pos center --size large --pressure 4000 --pen-width 12 --thickness 28 --frame --interval 2 --save-defaults
 
 # Live vector stroke injection
 rm-ai draw line --from 200,300 --to 800,300
@@ -179,39 +180,64 @@ rm-ai draw box --at 400,500 --size 300,200
 
 ---
 
-## Dedicated Fullscreen Clock & Productivity Dashboard
+## Dashboard
 
-Turn your reMarkable 2 into a dedicated minimalist executive desk display:
+Three ways to put a dashboard on the tablet, all rendered by the PC from the same template
+(clock, date, month calendar with today marked, weather, Claude usage, battery, priorities):
 
-- **Zero-Power Standby Display (`--mode standby`)**:
-  Updates `/usr/share/remarkable/suspended.png` with a clean Swiss typography clock, full-month calendar with today highlighted, live battery telemetry read from the tablet kernel, daily habits, action items, and notebook ruled lines. When the tablet is asleep, it holds this high-contrast display indefinitely with zero battery drain.
-  ```bash
-  # Generate and push dashboard to sleep screen:
-  rm-ai dashboard
-
-  # Push and put tablet to sleep immediately:
-  rm-ai dashboard --suspend
-
-  # Restore original factory sleep screen:
-  rm-ai dashboard --restore
+- **Sleep screen** (`rm-ai dashboard`, the default `--mode standby`): the image becomes the tablet's
+  sleep screen. It costs no battery and never touches the running app; the tablet shows it whenever
+  it sleeps and reads the image at that moment, so keep it fresh with a scheduled job:
   ```
-
-- **Interactive Notebook Document (`--mode doc`)**:
-  Generates a 226 DPI vector document and uploads it wirelessly into tablet documents as "Daily Dashboard". You can open it and write notes, check off checkboxes, or sketch directly with your physical Marker stylus:
-  ```bash
-  rm-ai dashboard --mode doc --title "Daily Dashboard"
+  */15 * * * * cd ~/projects/remarkable-ai && .venv/bin/python rm_ai.py dashboard --mode standby >> ~/.config/remarkable-ai/dashboard.log 2>&1
   ```
+- **Notebook page** (`--mode doc`): the same page as a PDF document you can write on. Every push
+  restarts the tablet's app, so this is for occasional use.
+- **Live page** (`--mode doc --live`): the page is pushed once as a template with a blank clock area
+  and printed usage rows, and from then on the virtual pen keeps it current: the time is rewritten
+  every minute in the page's own font, the usage rows whenever a value or reset time changes, all
+  without reloads. At midnight a fresh template is pushed (one reload a day) for the date and
+  calendar. `--no-push` reuses the page already open; `--usage-interval` sets the usage refresh in minutes.
+
+What the dashboard shows and where it comes from:
+
+| Block | Source | Needs |
+| :--- | :--- | :--- |
+| Weather: now, feels-like, wind, rain chance, today's high/low, sunrise/sunset, 5-day forecast | [Open-Meteo](https://open-meteo.com) | `--city` once (remembered) |
+| Claude usage: session, week, week for the scoped model (e.g. Fable), with reset times | the usage behind Claude Code's `/usage`, via the login in `~/.claude/.credentials.json` | a Claude Code login |
+| Claude API spend and tokens | Anthropic Usage & Cost Admin API | `ANTHROPIC_ADMIN_KEY` (organization accounts only) |
+| Battery level | the tablet over SSH | – |
+| Priorities | `--task "..."` (repeatable) | – |
 
 ---
 
-## Virtual Stylus & Minimal-Delta Clock Engine
+## Live Clock (`rm-ai clock`)
 
-`remarkable-ai` provides direct hardware event injection into `/dev/input/event1` (`Wacom I2C Digitizer`):
+A digital clock drawn on whatever page is open, with the tablet's own pen and eraser, so it updates
+in place with no reload: only the segments that change are erased and redrawn.
 
-- **Real-Time Drawing**: Emulates physical stylus pressure, coordinates, and contact directly into the Linux input subsystem. The active page renders strokes instantly with zero page reload or tablet restart.
-- **Paced Like a Real Pen**: xochitl smooths and predicts pen motion over time, so events are sent one frame every few milliseconds with a short hover before touch-down and a pause when switching between pen and eraser. Bursting a whole stroke at once stretches it and turns eraser strokes into pen lines.
-- **7-Segment Minimal-Delta State Machine**: When running the digital clock, each digit is broken down into 7 discrete physical segments (A through G). On every second tick, only the segments that change state are toggled (virtual pen to turn on, virtual eraser to turn off).
-- **Zero Screen Churn**: Segments that remain unchanged are never touched, achieving the absolute mathematical minimum number of changes per second on the e-ink screen.
+- **Position and size**: `--pos top-right | top-left | center | bottom-right | X,Y`, `--size small |
+  medium | large | xlarge`. The corner presets keep clear of the toolbar and the notebook menu.
+- **Look**: `--thickness N` builds bars from overlapping passes (or `max`); `--pressure 0..4095`;
+  `--frame` draws a rounded frame; `--format HH:MM:SS | HH:MM | MM:SS`.
+- **Pen**: you pick the pen on the tablet. At start the clock draws one short test line and reads its
+  width back from the page file to size its erase sweeps; `--pen-width` / `--ink-width` skip that.
+- **Cadence**: `--interval 2` shows the real time every 2 seconds, `--duration`, `--once`, `--clear`.
+- **Defaults**: add `--save-defaults` to any invocation to make its options the defaults.
+
+Things the tablet decides, not the tool: after "Erase all" the eraser stays the active tool and
+every stroke erases, so tap the pen first; the pencil gets both darker and wider with pressure; the
+page must stay open and the tablet awake.
+
+## How the virtual pen works
+
+Strokes are 16-byte Linux input events written straight into the tablet's Wacom digitizer over one
+SSH pipe, so they appear like real handwriting without any reload. The tablet smooths and predicts
+pen motion over time, so events are paced like a real pen (one frame every few milliseconds), the
+pen hovers before touching, every eraser stroke is followed by a short pause (the tablet drops
+strokes sent while it is still busy erasing), and pen speed is kept moderate because the pencil lays
+down less ink when moved fast. What actually landed on a page is verified by reading the page's
+stroke file back after the tablet's autosave; that loop is how all of the above was calibrated.
 
 ---
 

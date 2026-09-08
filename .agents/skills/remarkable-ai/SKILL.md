@@ -26,16 +26,17 @@ When the user asks to read, transcribe, summarize, or analyze a page from any no
    - Extract actionable to-dos and next steps.
 5. Delete `temp_page.png` after inspection.
 
-### 3. Dedicated Fullscreen Clock & Productivity Dashboard:
-When the user asks to turn the tablet into a desk clock, standby dashboard, or daily planner:
-- Run: `rm-ai dashboard` (updates tablet sleep screen with zero battery drain)
-- Run: `rm-ai dashboard --suspend` (puts tablet to sleep immediately so dashboard appears right away)
-- Run: `rm-ai dashboard --mode doc` (creates interactive notebook document on tablet for physical writing)
+### 3. Dashboard:
+When the user asks for a desk clock, standby dashboard, weather, Claude usage or a daily planner:
+- Run: `rm-ai dashboard --city <city>` (sleep-screen dashboard: date, calendar, weather, Claude usage, battery; no reload)
+- Run: `rm-ai dashboard --suspend` (put the tablet to sleep so it shows right away)
+- Run: `rm-ai dashboard --mode doc --live` (a notebook page kept current by the pen: HH:MM every minute, usage rows as they change)
 
 ### 4. Real-Time Digital Clock & Live Vector Drawing:
-- Real-time 7-segment digital clock: `rm-ai clock --pos top-right`
+- Clock on the open page: `rm-ai clock` (saved defaults) or e.g. `rm-ai clock --pos center --thickness 28 --frame --interval 2`
 - Single time stamp: `rm-ai clock --once`
 - Inject vector strokes: `rm-ai draw line --from X1,Y1 --to X2,Y2`
+- A notebook page must be open with the pen selected; after "Erase all" the eraser stays selected and strokes erase.
 
 ### 5. Pushing Documents:
 - Upload PDF or Markdown document: `rm-ai push file.pdf --folder "Work"`

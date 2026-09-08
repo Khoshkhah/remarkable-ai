@@ -1,14 +1,15 @@
 ---
-description: Turn tablet into a dedicated fullscreen desk clock and productivity dashboard
+description: Put a dashboard on the tablet: sleep screen (default), a notebook page, or a live page kept current by the pen
 ---
 
-Generate and push an executive E-ink dashboard to the tablet:
+Run the dashboard:
 ```bash
 rm-ai dashboard $ARGUMENTS
 ```
-Renders minimalist high-contrast digital clock, monthly calendar with today highlighted, live battery telemetry, daily habits, action items, and ruled notebook lines.
-Options:
-- `--mode standby` (default): Sets sleep screen (`/usr/share/remarkable/suspended.png`) for zero-battery desk clock display.
-- `--mode doc`: Generates vector notebook and pushes to tablet documents for live note-taking.
-- `--suspend`: Puts tablet to sleep immediately so the dashboard appears right away.
-- `--restore`: Restores original reMarkable sleep screen.
+Renders the date, month calendar with today marked, weather (Open-Meteo, `--city` once), Claude usage
+(session / week / week Fable with reset times, from the Claude Code login), battery, and priorities (`--task`).
+Modes:
+- `--mode standby` (default): sets the sleep screen (`/usr/share/remarkable/suspended.png`); no reload, zero battery.
+- `--mode doc`: pushes the page as a document you can write on (restarts the tablet's app).
+- `--mode doc --live`: pushes the page once, then keeps drawing HH:MM every minute and the usage rows on it with the pen; `--no-push` reuses the open page.
+- `--restore`: factory sleep screen back.

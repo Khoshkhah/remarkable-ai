@@ -25,8 +25,10 @@ whichever interpreter ran the installer, so running it inside `.venv` pins the l
 venv. `rm-ai.cmd` is a stale Windows launcher pointing at a different checkout; ignore it.
 
 No linter config, no build step. `python3 test_rm_ai.py` runs the only offline checks (stylus
-pacing and 7-segment geometry). Everything else is verified manually against a live tablet:
-`rm-ai devices` (connectivity), `rm-ai list` (read path), `rm-ai clock --once` (write path).
+pacing, 7-segment geometry, the usage and weather reducers). Everything else is verified manually
+against a live tablet: `rm-ai devices` (connectivity), `rm-ai list` (read path), `rm-ai clock --once`
+(write path). `.venv/` (gitignored) is the project's own environment; the user's crontab runs
+`.venv/bin/python rm_ai.py dashboard --mode standby` every 15 minutes from it.
 
 Implemented subcommands — **this is the authoritative list**: `devices`/`device`, `add-device`,
 `setup`/`setup-agent`/`install-skills`, `list`, `read`, `push`, `clock`, `draw`, `dashboard`/`dash`.
@@ -113,12 +115,20 @@ pressure and drawn width), with `--pen-width` as the manual override. `--save-de
 tick loop sleeps to the next wall-clock second, so drawing time cannot drift or skip seconds.
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
-image locally and scp's it to `/usr/share/remarkable/suspended.png`, backing the factory image up
-to `suspended.png.original` once (that backup is what `--restore` reads). `--mode doc` instead
-routes through the same PDF upload path as `push`; `--mode live` hands off to `DigitalClock`.
-`fetch_claude_usage()` adds Claude API spend and tokens under the calendar when `ANTHROPIC_ADMIN_KEY`
-is set: raw `urllib` calls to the Admin API cost and usage reports (they are not in the SDK), reduced
-by the pure `summarize_claude_usage()` that `test_rm_ai.py` checks against the documented shapes.
+image locally. `--mode standby` scp's it to `/usr/share/remarkable/suspended.png`, backing the factory
+image up to `suspended.png.original` once (`--restore` reads that); the tablet reads it only when it
+falls asleep, so a cron job keeps it current. `--mode doc` routes through the same PDF upload path as
+`push` (each push restarts xochitl). `--mode doc --live` pushes the template once (`margins=0`, so the
+page maps 1:1 to the screen), waits for the document to be opened (`wait_for_open` watches
+`lastOpened`; xochitl's restart restores the document *without* touching it, so the wait is capped),
+then `run_live_dashboard()` draws on the page with the pen: every minute it sweeps the clock zone
+(`sweep_path`, one eraser serpentine), hovers `START_SETTLE`, and writes HH:MM via `text_strokes()`
+(the page's font filled with horizontal pen runs); usage rows are redone the same way when their
+value or reset time changes; at midnight it re-pushes the template. Inputs: `fetch_weather()`
+(Open-Meteo, city geocoded once into the config), `fetch_claude_subscription_usage()` (the `limits`
+list of the usage endpoint behind Claude Code's `/usage`, read with the token in
+`~/.claude/.credentials.json`), `fetch_claude_usage()` (Admin API, needs `ANTHROPIC_ADMIN_KEY`); the
+pure `summarize_*` reducers are the tested parts. `--mode live` hands off to `DigitalClock`.
 
 ## Agent configuration lives in three places and is copied outward
 
