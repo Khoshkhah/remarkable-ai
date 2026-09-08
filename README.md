@@ -25,7 +25,10 @@ git clone https://github.com/Khoshkhah/remarkable-ai.git
 cd remarkable-ai
 
 # 2. Run the automated installer (installs package, CLI, and AI agent skills)
-python install.py
+python3 install.py
+
+# 3. Connect your tablet wirelessly:
+rm-ai setup
 ```
 
 ### Option B: Manual Virtualenv Setup
