@@ -16,9 +16,28 @@ Connect your reMarkable tablets wirelessly to **Claude, Gemini, and ChatGPT** ov
 - **Antigravity / Gemini Skills**: Native Agent Skill ready for autonomous agent execution.
 - **Obsidian Ready**: Export notes and diagrams directly into Obsidian markdown vaults.
 
+## Quickstart Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Khoshkhah/remarkable-ai.git
+cd remarkable-ai
+
+# 2. Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# 3. Install the package
+pip install -e .
+
+# 4. Ready to use!
+rm-ai list
+```
+
 ---
 
 ## Multi-Device Configuration
+
 
 `remarkable-ai` supports multiple tablets connected to your Wi-Fi network.
 
