@@ -50,8 +50,8 @@ rm-ai setup
 
 ### 1. View & Interactively Select Tablet
 ```bash
-# Show configured tablets and select interactively:
-rm-ai device
+# Show configured tablets and select interactively (alias: rm-ai device):
+rm-ai devices
 ```
 Output:
 ```text
@@ -66,12 +66,12 @@ Switched active tablet to: [rm-alt] reMarkable 2 (Secondary)
 ### 2. Direct Switch by Name or Number
 ```bash
 # Switch to tablet by name or number:
-rm-ai device 2
-rm-ai device rm-alt
+rm-ai devices 2
+rm-ai devices rm-alt
 
 # Switch back to primary:
-rm-ai device 1
-rm-ai device rm2
+rm-ai devices 1
+rm-ai devices rm2
 ```
 
 ### 3. Add a New Tablet
@@ -145,7 +145,11 @@ rm-ai read "D-Wave" --page 5 --action transcribe
 rm-ai push report.pdf --folder "Work/Reports"
 rm-ai push notes.md --folder "AI-Summaries" --title "Morning Brief"
 
-# Target specific tablet
+# List configured tablets or switch active tablet
+rm-ai devices
+rm-ai devices 2
+
+# Target specific tablet for a single command
 rm-ai --device rm-alt read
 
 # Dedicated Fullscreen Clock & Productivity Dashboard (0-Power Standby)
@@ -235,6 +239,12 @@ Inside Claude Code, you can use dedicated slash commands:
 | `/rm-list` | Lists all notebooks with last modified dates and page counts |
 | `/rm-read [name]` | Pulls the page, renders handwriting, and analyzes with Claude Vision |
 | `/rm-tasks [name]` | Extracts all to-do items and creates an actionable checklist |
+| `/rm-devices` | Lists configured tablets and displays active device status |
+| `/rm-dashboard` | Turns tablet into fullscreen desk clock and productivity dashboard |
+| `/rm-clock` | Runs real-time 7-segment clock on active page via Virtual Stylus |
+| `/rm-push <file>` | Wirelessly uploads PDF or Markdown document to tablet |
+| `/rm-export [name]` | Exports note with embedded vector SVG/PNG assets and transcript |
+| `/rm-setup` | Runs interactive setup wizard and refreshes agent slash commands |
 
 
 ---
