@@ -144,7 +144,14 @@ weather block as Helvetica text in the sleep screen's layout, `weather_block()`)
 `swap_daily_page()` puts it over the document's PDF and restarts xochitl, only while no document is
 open (`home_screen()`), on a new day or when the printed weather is over 6 h old; the first push is the
 PC's full page. The pen strokes live in the `.rm` and survive the swap; the PC's standby cron tops the
-template stock up (`top_up_dash_pages`, no reload). `TABLET_DASH_LAYOUT` is the single source of the
+template stock up (`top_up_dash_pages`, no reload). The sleep screen: `render_sleep_backgrounds()` renders
+the standby template with `stamp=True` (header text, weather values, usage rows and the footer time
+left blank) for the same days as `sleep/YYYY-MM-DD.rle` (`rle_encode`, value/count triples), and
+`bake_font_atlases()` ships glyph bitmaps of `SLEEP_FONTS` (`f<size><b|r>.atlas`, PIL placement: left,
+top, advance per glyph); rmdash's `compose_sleep()` loads the day's background, stamps the live values in
+the standby layout (`stamp_text`, coverage blend), and writes `/usr/share/remarkable/suspended.png` with
+its own PNG writer (stored deflate blocks, no zlib on the tablet) after every fetch, at most every 15 min;
+the standby cron then only tops the stocks up (`dash_app.sleep`). `TABLET_DASH_LAYOUT` is the single source of the
 pen-owned zones (clock and the three usage rows, erased whole when a value in them changes), text
 origins and bars, written to the tablet as `layout`; rmdash draws only zones whose sweep file exists.
 Glyphs are single strokes: `STROKE_FONT` is a designed plotter-style font (lines and arcs on a 100-unit

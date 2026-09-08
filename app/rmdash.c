@@ -303,6 +303,169 @@ static void draw_zone(int z, const char *want, struct tm *lt, int eraser) {
     }
 }
 
+/* ---------- the sleep screen: the day's background (RLE) + the live values stamped with glyph bitmaps, as PNG ---------- */
+static void dow_of(const char *ymd, char *out);
+#define SW 1404
+#define SH 1872
+static unsigned char *simg;   /* SW*SH gray */
+static char sleep_png[600];
+
+struct glyph { int16_t l, t, w, h, adv; unsigned char *px; };
+struct atlas { int size, bold; struct glyph g[256]; int loaded; };
+static struct atlas atlases[8]; static int natlas = 0;
+
+static struct atlas *font(int size, int bold) {
+    for (int i = 0; i < natlas; i++) if (atlases[i].size == size && atlases[i].bold == bold) return &atlases[i];
+    if (natlas == 8) return NULL;
+    struct atlas *a = &atlases[natlas]; memset(a, 0, sizeof *a); a->size = size; a->bold = bold;
+    char name[32]; snprintf(name, sizeof name, "f%d%c.atlas", size, bold ? 'b' : 'r');
+    size_t len; unsigned char *blob = load(name, &len);
+    if (!blob || len < 6 || memcmp(blob, "ATLS", 4)) { fprintf(stderr, "no font atlas %s\n", name); free(blob); return NULL; }
+    int n = (int16_t)(blob[4] | blob[5] << 8); size_t p = 6;
+    for (int i = 0; i < n && p + 12 <= len; i++) {
+        int16_t v[6]; for (int k = 0; k < 6; k++) { v[k] = (int16_t)(blob[p] | blob[p + 1] << 8); p += 2; }
+        int code = v[0] & 255; struct glyph *g = &a->g[code];
+        g->l = v[1]; g->t = v[2]; g->w = v[3]; g->h = v[4]; g->adv = v[5];
+        size_t npx = (size_t)g->w * g->h;
+        if (npx && p + npx <= len) { g->px = malloc(npx); memcpy(g->px, blob + p, npx); }
+        p += npx;
+    }
+    free(blob); a->loaded = 1; natlas++;
+    return a;
+}
+
+static void stamp_text(int size, int bold, int x, int y, int gray, const char *s) {
+    struct atlas *a = font(size, bold); if (!a) return;
+    for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
+        struct glyph *g = &a->g[*c];
+        for (int j = 0; j < g->h; j++) for (int i = 0; i < g->w; i++) {
+            int px = x + g->l + i, py = y + g->t + j; if (px < 0 || py < 0 || px >= SW || py >= SH) continue;
+            int cov = g->px[j * g->w + i]; unsigned char *d = &simg[py * SW + px];
+            *d = (unsigned char)((*d * (255 - cov) + gray * cov) / 255);
+        }
+        x += g->adv;
+    }
+}
+static void stamp_rect(int x0, int y0, int x1, int y1, int gray) {
+    for (int y = y0; y < y1 && y < SH; y++) for (int x = x0; x < x1 && x < SW; x++) if (x >= 0 && y >= 0) simg[y * SW + x] = (unsigned char)gray;
+}
+static void stamp_frame(int x0, int y0, int x1, int y1, int w, int gray) {
+    stamp_rect(x0, y0, x1, y0 + w, gray); stamp_rect(x0, y1 - w, x1, y1, gray); stamp_rect(x0, y0, x0 + w, y1, gray); stamp_rect(x1 - w, y0, x1, y1, gray);
+}
+
+static int load_background(const char *day) {
+    char name[64]; snprintf(name, sizeof name, "sleep/%s.rle", day);
+    size_t len; unsigned char *rle = load(name, &len); if (!rle) return 0;
+    size_t o = 0;
+    for (size_t p = 0; p + 2 < len && o < (size_t)SW * SH; p += 3) {
+        size_t n = rle[p + 1] | rle[p + 2] << 8; if (o + n > (size_t)SW * SH) n = (size_t)SW * SH - o;
+        memset(simg + o, rle[p], n); o += n;
+    }
+    free(rle);
+    return o == (size_t)SW * SH;
+}
+
+/* PNG, 8-bit gray, stored (uncompressed) deflate blocks: no zlib on the tablet */
+static uint32_t crc_table[256];
+static uint32_t crc32_(uint32_t c, const unsigned char *b, size_t n) {
+    if (!crc_table[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t r = i; for (int k = 0; k < 8; k++) r = r & 1 ? 0xEDB88320u ^ (r >> 1) : r >> 1; crc_table[i] = r; }
+    c ^= 0xFFFFFFFFu; for (size_t i = 0; i < n; i++) c = crc_table[(c ^ b[i]) & 255] ^ (c >> 8); return c ^ 0xFFFFFFFFu;
+}
+static void be32(unsigned char *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+static void png_chunk(FILE *f, const char *type, const unsigned char *data, size_t n) {
+    unsigned char h[8]; be32(h, (uint32_t)n); memcpy(h + 4, type, 4); fwrite(h, 1, 8, f);
+    if (n) fwrite(data, 1, n, f);
+    uint32_t c = crc32_(0, (const unsigned char *)type, 4); c = crc32_(c, data, n);
+    unsigned char t[4]; be32(t, c); fwrite(t, 1, 4, f);
+}
+static int write_png(const char *path) {
+    size_t raw_n = (size_t)SH * (SW + 1);
+    unsigned char *raw = malloc(raw_n);
+    for (int y = 0; y < SH; y++) { raw[y * (SW + 1)] = 0; memcpy(raw + y * (SW + 1) + 1, simg + y * SW, SW); }
+    size_t blocks = (raw_n + 65534) / 65535, zn = 2 + raw_n + blocks * 5 + 4;
+    unsigned char *z = malloc(zn); size_t p = 0;
+    z[p++] = 0x78; z[p++] = 0x01;
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < raw_n; i++) { a = (a + raw[i]) % 65521; b = (b + a) % 65521; }
+    for (size_t off = 0; off < raw_n; off += 65535) {
+        size_t n = raw_n - off < 65535 ? raw_n - off : 65535;
+        z[p++] = off + n >= raw_n; z[p++] = n & 255; z[p++] = n >> 8; z[p++] = ~n & 255; z[p++] = (~n >> 8) & 255;
+        memcpy(z + p, raw + off, n); p += n;
+    }
+    be32(z + p, (b << 16) | a); p += 4;
+    FILE *f = fopen(path, "wb"); if (!f) { free(raw); free(z); return 0; }
+    fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
+    unsigned char ihdr[13] = {0}; be32(ihdr, SW); be32(ihdr + 4, SH); ihdr[8] = 8; ihdr[9] = 0;
+    png_chunk(f, "IHDR", ihdr, 13);
+    png_chunk(f, "IDAT", z, p);
+    png_chunk(f, "IEND", NULL, 0);
+    fclose(f); free(raw); free(z);
+    return 1;
+}
+
+static void battery(int *pct, char *status, size_t cap) {   /* the tablet's own battery, as the PC used to print it */
+    *pct = -1; status[0] = 0;
+    FILE *f = popen("cat /sys/class/power_supply/*/capacity 2>/dev/null | head -n 1; cat /sys/class/power_supply/*/status 2>/dev/null | head -n 1", "r");
+    if (!f) return;
+    char line[64];
+    if (fgets(line, sizeof line, f)) *pct = atoi(line);
+    if (fgets(line, sizeof line, f)) { line[strcspn(line, "\r\n")] = 0; snprintf(status, cap, "%s", line); upper(status); }
+    pclose(f);
+}
+
+/* the sleep screen exactly as render_dashboard_image() paints it for standby, values stamped on the day's background */
+static int compose_sleep(void) {
+    if (!sleep_png[0]) return 0;
+    if (!simg) simg = malloc((size_t)SW * SH);
+    time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
+    char day[16], s[200]; strftime(day, sizeof day, "%Y-%m-%d", &lt);
+    if (!load_background(day)) { static int said = 0; if (!said++) fprintf(stderr, "no sleep screen for %s in the stock\n", day); return 0; }
+    int pct; char st[32]; battery(&pct, st, sizeof st);
+    if (pct >= 0) snprintf(s, sizeof s, "REMARKABLE 2  \x95  %d%% BATTERY%s%s  \x95  ONLINE", pct, st[0] ? "  \x95  " : "", st);
+    else snprintf(s, sizeof s, "REMARKABLE 2  \x95  E-INK EXECUTIVE DESK DISPLAY");
+    stamp_text(22, 1, 80, 68, 0, s);
+    if (wx.ok) {
+        snprintf(s, sizeof s, "%.0f\xB0", wx.temp); stamp_text(96, 1, 630, 478, 0, s);
+        stamp_text(32, 1, 840, 495, 0, WMO(wx.code));
+        if (wx.dpop[0] > -999) snprintf(s, sizeof s, "feels %.0f\xB0  \x95  wind %.0f m/s  \x95  rain %.0f%%", wx.feels, wx.wind, wx.dpop[0]);
+        else snprintf(s, sizeof s, "feels %.0f\xB0  \x95  wind %.0f m/s", wx.feels, wx.wind);
+        stamp_text(22, 0, 840, 545, 0, s);
+        if (wx.rise[0][0]) snprintf(s, sizeof s, "TODAY  H %.0f\xB0  L %.0f\xB0   \x95   sunrise %s   sunset %s", wx.dmax[0], wx.dmin[0], wx.rise[0], wx.set[0]);
+        else snprintf(s, sizeof s, "TODAY  H %.0f\xB0  L %.0f\xB0", wx.dmax[0], wx.dmin[0]);
+        stamp_text(22, 1, 630, 605, 0, s);
+        int y = 655;
+        for (int i = 1; i < wx.n && i < 6; i++, y += 42) {
+            char dow[8]; dow_of(wx.day[i], dow);
+            stamp_text(22, 1, 630, y, 0, dow);
+            stamp_text(22, 0, 720, y, 0, WMO((int)wx.dcode[i]));
+            snprintf(s, sizeof s, "%.0f\xB0 / %.0f\xB0", wx.dmax[i], wx.dmin[i]); stamp_text(22, 0, 1010, y, 0, s);
+            if (wx.dpop[i] > -999) { snprintf(s, sizeof s, "%.0f%%", wx.dpop[i]); stamp_text(22, 0, 1210, y, 0, s); }
+            stamp_rect(630, y + 34, 1324, y + 35, 220);
+        }
+    }
+    for (int i = 0; i < 3; i++) {   /* the compact usage rows of the sleep screen */
+        char k[8], v[40], label[40]; snprintf(k, sizeof k, "pct%d", i);
+        if (!read_kv("usage", k, v, sizeof v)) break;
+        int p = atoi(v); if (p < 0) p = 0; if (p > 100) p = 100;
+        int y = 995 + 58 * i;
+        snprintf(k, sizeof k, "label%d", i); if (!read_kv("usage", k, label, sizeof label)) strcpy(label, "");
+        upper(label); stamp_text(18, 1, 105, y, 0, label);
+        stamp_frame(250, y + 2, 471, y + 21, 2, 0);
+        stamp_rect(252, y + 4, 252 + 216 * p / 100, y + 19, 0);
+        snprintf(s, sizeof s, "%d%%", p); stamp_text(18, 1, 480, y, 0, s);
+        snprintf(k, sizeof k, "reset%d", i);
+        if (read_kv("usage", k, v, sizeof v) && atol(v)) {
+            time_t r = atol(v); struct tm rt; localtime_r(&r, &rt); char when[32]; strftime(when, sizeof when, "%a %H:%M", &rt);
+            snprintf(s, sizeof s, "resets %s", when); stamp_text(15, 0, 250, y + 26, 110, s);
+        }
+    }
+    strftime(s, sizeof s, "Updated: %Y-%m-%d %H:%M", &lt); stamp_text(20, 0, 1080, 1735, 0, s);
+    char tmp[620]; snprintf(tmp, sizeof tmp, "%s.tmp", sleep_png);
+    if (!write_png(tmp) || rename(tmp, sleep_png)) { fprintf(stderr, "could not write the sleep screen\n"); return 0; }
+    fprintf(stderr, "sleep screen painted for %s\n", day);
+    return 1;
+}
+
 /* ---------- the printed page: the PC's JPEG template for the day + the weather block as PDF text ---------- */
 #define PT (72.0 / 226.0)   /* display px -> PDF points */
 static char pdfbuf[1 << 16];
@@ -417,6 +580,7 @@ int main(int argc, char **argv) {
     if (!read_kv("config", "doc", doc, sizeof doc)) { fprintf(stderr, "config: no doc=\n"); return 1; }
     read_kv("config", "rm", rmfile, sizeof rmfile);
     read_kv("config", "pdf", pdf, sizeof pdf);
+    read_kv("config", "sleep", sleep_png, sizeof sleep_png);
     read_kv("config", "city", city, sizeof city);
     if (read_kv("config", "lat", tmpv, sizeof tmpv)) lat = atof(tmpv);
     if (read_kv("config", "lon", tmpv, sizeof tmpv)) lon = atof(tmpv);
@@ -429,8 +593,8 @@ int main(int argc, char **argv) {
     journal_start(doc);
     static char shown[NZ][512], want[NZ][512];
     char state_path[600]; snprintf(state_path, sizeof state_path, "%s/state", dir);
-    int active = 0, lost = 0;
-    time_t fetched = 0;
+    int active = 0, lost = 0, sleep_due = 0;
+    time_t fetched = 0, slept = 0;
     struct ink ink = {0};
     while (1) {
         if (page_lost) {                                    /* stopped mid-draw: forget what is drawn, erase everything next time */
@@ -449,7 +613,8 @@ int main(int argc, char **argv) {
                     save_state(shown, mtime(rmfile));
                 }
             }
-            if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); }   /* keeps the printed weather fresh */
+            if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); sleep_due = 1; }   /* keeps the printed weather fresh */
+            if (sleep_due && time(NULL) - slept >= 15 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
             if (!is_open) give_back_the_pen(doc);
             swap_daily_page();
             sleep(2);
@@ -494,10 +659,11 @@ int main(int argc, char **argv) {
             long long t0 = now_us();
             if (zone_on[7]) fetch_weather();
             fetch_usage();
-            fetched = time(NULL);
+            fetched = time(NULL); sleep_due = 1;
             fprintf(stderr, "data fetched in %.1f s\n", (now_us() - t0) / 1e6);
             continue;
         }
+        if (sleep_due && time(NULL) - slept >= 15 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
         long wait = 60 - (long)(time(NULL) % 60);
         while (wait > 0 && page_on_screen()) { nap(2000000); wait -= 2; }
     }

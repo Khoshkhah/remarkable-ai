@@ -241,8 +241,10 @@ the **Marker** on that page; a thick pen makes them bold). Date, calendar and th
 printed: the installer leaves the next 60 days of page templates on the tablet, the tablet fetches
 the weather from Open-Meteo itself, composes each day's page with the weather block in the sleep
 screen's format and swaps it in between documents (one reload of the tablet's app per day, and when
-the printed weather is more than six hours old). The PC's dashboard cron only tops the template
-stock up when it happens to run. Reopening an unchanged page continues where it left off, a page you
+the printed weather is more than six hours old). The sleep screen is the tablet's too: it stamps
+the weather, the usage rows, its battery and the time onto the day's background (a stock of those is
+on board as well) and writes the sleep image itself every 15 minutes, no reload needed. The PC's
+dashboard cron then only tops the stocks up when it happens to run. Reopening an unchanged page continues where it left off, a page you
 wrote on is cleaned zone by zone first, a page you erased is drawn again, and a page left with the
 eraser selected gets the pen back before its next open. Both tablet programs draw only while the
 tablet's own app reports the page open in its editor, checked before every stroke, so nothing is ever

@@ -1639,6 +1639,54 @@ GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 40: "ABCDEFGHIJKLMNOPQRSTUV
 DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to compose and swap in by itself
 
 
+SLEEP_FONTS = ((22, True), (96, True), (32, True), (22, False), (18, True), (15, False), (20, False))   # what the tablet stamps with
+SLEEP_CHARS = "".join(chr(c) for c in range(32, 127)) + "°•"
+
+
+def rle_encode(data):
+    """Runs of (value, count<=65535) over the pixels, tiny for a mostly white page; app/rmdash.c decodes it."""
+    out = bytearray()
+    for m in re.finditer(rb"(.)\1*", data, re.S):
+        v, n = m.group(1)[0], m.end() - m.start()
+        while n > 0:
+            k = min(n, 65535)
+            out += bytes((v, k & 255, k >> 8))
+            n -= k
+    return bytes(out)
+
+
+def render_sleep_backgrounds(out, city_name, tasks, days=DASH_STOCK_DAYS):
+    """The sleep screen for today and the coming `days` with the live values blank (sleep/YYYY-MM-DD.rle)."""
+    (out / "sleep").mkdir(exist_ok=True)
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    for i in range(days + 1):
+        day = today + timedelta(days=i)
+        im = render_dashboard_image(tasks=tasks, weather={"name": city_name} if city_name else None, now=day, stamp=True).convert("L")
+        (out / "sleep" / f"{day.strftime('%Y-%m-%d')}.rle").write_bytes(rle_encode(im.tobytes()))
+
+
+def bake_font_atlases(out):
+    """Glyph bitmaps of the fonts the sleep screen uses, placed as PIL places them (left/top of the glyph
+    box from the text origin, advance width), as f<size><b|r>.atlas: 'ATLS', count, then per glyph
+    code, left, top, width, height, advance (int16 each) and width*height coverage bytes."""
+    from PIL import Image, ImageDraw
+    for size, bold in SLEEP_FONTS:
+        font = get_font(size, bold=bold)
+        blob = bytearray(b"ATLS") + struct.pack("<h", len(SLEEP_CHARS))
+        for ch in SLEEP_CHARS:
+            code = {"°": 176, "•": 149}.get(ch, ord(ch))
+            l, t, r, b = font.getbbox(ch)
+            w, h = max(0, r - l), max(0, b - t)
+            if w and h:
+                im = Image.new("L", (r + 2, b + 2), 0)
+                ImageDraw.Draw(im).text((0, 0), ch, font=font, fill=255)
+                px = im.crop((l, t, r, b)).tobytes()
+            else:
+                px = b""
+            blob += struct.pack("<hhhhhh", code, l, t, w, h, round(font.getlength(ch))) + px
+        (out / f"f{size}{'b' if bold else 'r'}.atlas").write_bytes(bytes(blob))
+
+
 def render_dash_pages(out, city_name, tasks, days=DASH_STOCK_DAYS):
     """JPEG templates of the dashboard page for today and the coming `days` (pages/YYYY-MM-DD.jpg):
     everything printed except the weather block, which the tablet adds when it composes the page."""
@@ -1845,12 +1893,16 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         bake_dash_app(out)
+        bake_font_atlases(out)
+        render_sleep_backgrounds(out, loc.get("name", ""), tasks)
+        run_ssh("test -f /usr/share/remarkable/suspended.png.original || cp /usr/share/remarkable/suspended.png /usr/share/remarkable/suspended.png.original", host=host)
         shutil.move(str(stock / "pages"), str(out / "pages"))
         shutil.rmtree(stock, ignore_errors=True)
         if not (no_push and existing):
             (out / "printed").write_text(f"{datetime.now().strftime('%Y-%m-%d')} {int(time.time())}\n")   # else the tablet keeps its own
         (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\npdf={REMOTE_PATH}/{doc_uuid}.pdf\n"
-                                    f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=5\n")
+                                    f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=5\n"
+                                    f"sleep=/usr/share/remarkable/suspended.png\n")
         if token:
             (out / "token").write_text(token)
             os.chmod(out / "token", 0o600)
@@ -1862,7 +1914,8 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         shutil.copy(binary, out / "rmdash")
         (out / "rmdash.service").write_text(RMCLOCK_UNIT.replace("rmclock", "rmdash").replace(TABLET_APP_DIR, TABLET_DASH_DIR)
                                             .replace("its Clock document", "its Dashboard page"))
-        print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes, {DASH_STOCK_DAYS + 1} daily pages and the dashboard program on the tablet...", flush=True)
+        print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes, {DASH_STOCK_DAYS + 1} daily pages and sleep screens, "
+              f"{len(SLEEP_FONTS)} fonts and the dashboard program on the tablet...", flush=True)
         # a token the tablet has been renewing itself is newer than any copy on the PC: keep it unless one is
         # given; without a push the printed page is still the one on the tablet, so keep its date too
         keep = "token printed"   # never `state`: a reinstall may change how things are drawn, so the page is redone
@@ -1872,25 +1925,27 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_DASH_DIR} -xf -"], input=tar, check=True)
     run_ssh(f"chmod +x {TABLET_DASH_DIR}/rmdash && chmod 600 {TABLET_DASH_DIR}/token 2>/dev/null; mv {TABLET_DASH_DIR}/rmdash.service /etc/systemd/system/ && "
             "systemctl daemon-reload && systemctl enable rmdash >/dev/null 2>&1 && systemctl restart rmdash", host=host)
-    cfg["dash_app"] = {"feed": not has_token, "city": city, "tasks": [t for t, _ in tasks] if tasks else None}
+    cfg["dash_app"] = {"feed": not has_token, "city": city, "tasks": [t for t, _ in tasks] if tasks else None, "sleep": True}
     save_config(cfg)
     how = "fetches its Claude usage itself" if has_token else "gets its Claude usage from this PC's dashboard cron (no tablet login given)"
-    print(f"✅ Dashboard installed: open '{doc_title}' on the tablet and it draws the time, weather and usage by itself and"
-          f" swaps in each day's printed page (pages for {DASH_STOCK_DAYS} days on board); it {how}. Log: ssh {host} journalctl -u rmdash -f")
+    print(f"✅ Dashboard installed: open '{doc_title}' on the tablet and it draws the time, weather and usage by itself,"
+          f" swaps in each day's printed page and paints the sleep screen itself ({DASH_STOCK_DAYS} days on board); it {how}. "
+          f"Log: ssh {host} journalctl -u rmdash -f")
 
 
 def top_up_dash_pages(host, city, tasks):
-    """Keep the tablet's stock of printed dashboard pages DASH_STOCK_DAYS long (no reload; the tablet swaps them in)."""
-    have = set(run_ssh(f"ls {TABLET_DASH_DIR}/pages 2>/dev/null; true", host=host).split())
+    """Keep the tablet's stocks of printed pages and sleep screens DASH_STOCK_DAYS long (no reload)."""
+    have = set(run_ssh(f"cd {TABLET_DASH_DIR} 2>/dev/null && ls pages sleep 2>/dev/null; true", host=host).split())
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         render_dash_pages(out, city, tasks)
-        new = [p for p in (out / "pages").iterdir() if p.name not in have]
+        render_sleep_backgrounds(out, city, tasks)
+        new = [f"{d}/{p.name}" for d in ("pages", "sleep") for p in (out / d).iterdir() if p.name not in have]
         if not new:
             return
-        tar = subprocess.run(["tar", "-C", str(out), "-cf", "-"] + [f"pages/{p.name}" for p in new], capture_output=True, check=True).stdout
+        tar = subprocess.run(["tar", "-C", str(out), "-cf", "-"] + new, capture_output=True, check=True).stdout
         subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_DASH_DIR} -xf -"], input=tar, check=True)
-        print(f"📅 {len(new)} new daily pages added to the tablet dashboard's stock")
+        print(f"📅 {len(new)} new daily pages/sleep screens added to the tablet dashboard's stock")
 
 
 def uninstall_dash_app(host):
@@ -2200,9 +2255,11 @@ def fetch_weather(city):
         return {"error": str(e)[:80]}
 
 
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False, now=None, pen_weather=False):
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False, now=None, pen_weather=False, stamp=False):
     """`now` renders the page for another day (the tablet dashboard keeps a stock of coming days);
-    `pen_weather` prints only the weather header, the tablet draws the values (TABLET_DASH_LAYOUT)."""
+    `pen_weather` prints only the weather header, the tablet adds the block itself; `stamp` renders a
+    sleep-screen background with every live value left blank (header, weather, usage rows, footer
+    time): the tablet stamps them on with SLEEP_FONTS glyphs (app/rmdash.c compose_sleep)."""
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
@@ -2217,7 +2274,8 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
         left_header = f"REMARKABLE 2 • {bat_pct}% BATTERY{stat_str} • ONLINE"
     else:
         left_header = "REMARKABLE 2 • E-INK EXECUTIVE DESK DISPLAY"
-    draw.text((80, 68), left_header, font=f_top, fill=0)
+    if not stamp:
+        draw.text((80, 68), left_header, font=f_top, fill=0)
 
     day_of_year = now.strftime("%j")
     week_num = now.strftime("%V")
@@ -2278,8 +2336,8 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     # Claude API usage, just under the calendar (fits the 6-row months too)
     y_use = y_cal + 8
-    if live:
-        pass   # the live pages have the usage box; the Admin API spend line is the sleep screen's
+    if live or stamp:
+        pass   # the live pages have the usage box; the Admin API spend line is the PC's sleep screen's
     elif claude_usage is None:
         draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
         draw.text((250, y_use), "spend needs ANTHROPIC_ADMIN_KEY", font=get_font(18), fill=110)
@@ -2303,11 +2361,13 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
             draw.text((105, y_row), label, font=get_font(22, bold=True), fill=0)
             draw.rectangle([(LIVE_BAR_X[0] - 4, y_row), (LIVE_BAR_X[1] + 4, y_row + 26)], outline=0, width=2)
             draw.text((268, y_row + 128), "%", font=get_font(34, bold=True), fill=0)   # right after the pen-drawn number
-    elif subscription and "windows" in subscription:
+    elif stamp or (subscription and "windows" in subscription):
         draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
         draw.text((105, 940), "CLAUDE USAGE", font=get_font(22, bold=True), fill=0)
         draw.line([(105, 975), (525, 975)], fill=200, width=1)
         y_row = 995
+        if stamp:
+            subscription = {"windows": []}   # rows stamped by the tablet (compose_sleep in app/rmdash.c)
         for label, pct, resets in subscription["windows"]:
             pct = max(0.0, min(100.0, float(pct)))
             draw.text((105, y_row), label.upper(), font=get_font(18, bold=True), fill=0)
@@ -2352,7 +2412,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     # 5. Right Column: weather (when a city is set), then priorities, then ruled notes (only without weather)
     y_task = 490
-    if pen_weather:   # the tablet prints the weather block itself (app/rmdash.c), same rows and sizes as below
+    if pen_weather or stamp:   # the tablet prints/stamps the weather block itself (app/rmdash.c), same rows and sizes as below
         draw.text((630, 425), f"WEATHER  •  {(weather or {}).get('name', '').upper()}".rstrip(" •"), font=f_sec, fill=0)
         draw.line([(630, 465), (1324, 465)], fill=0, width=2)
         draw.text((630, 885), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
@@ -2426,7 +2486,8 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     f_foot = get_font(20, bold=False)
     draw.text((80, 1735), "reMarkable AI • Autonomous E-Ink Desk Display", font=f_foot, fill=0)
     ts_str = now.strftime("%Y-%m-%d %H:%M")
-    draw.text((1080, 1735), f"Updated: {ts_str}", font=f_foot, fill=0)
+    if not stamp:
+        draw.text((1080, 1735), f"Updated: {ts_str}", font=f_foot, fill=0)
 
     return im
 
@@ -2921,8 +2982,11 @@ def cmd_dashboard(args):
             im.save(save_path, "PNG")
             print(f"Saved local preview image to {save_path}")
 
-        print("Uploading dashboard to tablet standby screen (/usr/share/remarkable/suspended.png)...")
         dash_app = load_config().get("dash_app")
+        if dash_app and dash_app.get("sleep"):
+            print("🖼️  The tablet paints its own sleep screen now (rm-ai dashboard --install); only its stock is topped up.")
+        else:
+            print("Uploading dashboard to tablet standby screen (/usr/share/remarkable/suspended.png)...")
         if dash_app:   # the tablet dashboard runs by itself; this only tops up its stock of printed pages when the PC is around
             try:
                 top_up_dash_pages(target_host, (load_config().get("weather_location") or {}).get("name", ""),
@@ -2931,6 +2995,9 @@ def cmd_dashboard(args):
                 print(f"⚠️  tablet dashboard pages not topped up: {str(e)[:80]}")
             if dash_app.get("feed") and subscription and "windows" in subscription:
                 feed_dash_usage(target_host, subscription)   # the tablet dashboard without a login of its own
+            if dash_app.get("sleep"):
+                os.unlink(temp_png)
+                return
         try:
             # Ensure backup of original
             run_ssh("test -f /usr/share/remarkable/suspended.png.original || cp /usr/share/remarkable/suspended.png /usr/share/remarkable/suspended.png.original", host=target_host)

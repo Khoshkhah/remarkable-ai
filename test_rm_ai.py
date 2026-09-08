@@ -167,6 +167,12 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         assert all(c in rm_ai.STROKE_FONT for chars in rm_ai.GLYPH_SETS.values() for c in chars)
         rm_ai.render_dash_pages(out, "Burnaby", None, days=2)
         assert len(list((out / "pages").glob("*.jpg"))) == 3
+        rm_ai.render_sleep_backgrounds(out, "Burnaby", None, days=1)
+        rle = next((out / "sleep").glob("*.rle")).read_bytes()
+        assert len(rle) % 3 == 0 and sum(rle[i + 1] | (rle[i + 2] << 8) for i in range(0, len(rle), 3)) == 1404 * 1872
+        rm_ai.bake_font_atlases(out)
+        assert (out / "f96b.atlas").read_bytes()[:4] == b"ATLS" and len(rm_ai.SLEEP_CHARS) == 97
+    assert rm_ai.rle_encode(b"\xff\xff\x00") == b"\xff\x02\x00\x00\x01\x00"
     assert rm_ai.usage_file_text({"windows": [("Session", 12.4, "2026-09-08T21:59:59+00:00")]}).count("\n") == 5
 
 
