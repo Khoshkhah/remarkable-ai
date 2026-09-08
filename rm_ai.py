@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import struct
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 CONFIG_FILE = os.path.expanduser("~/.config/remarkable-ai/config.json")
@@ -745,36 +745,28 @@ class VirtualStylus:
         data += self.pack_event(EV_KEY, BTN_TOUCH, 1)
         data += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
-        self.proc.stdin.write(data)
-        self.proc.stdin.flush()
-        time.sleep(0.006)
-
-        # 3. Intermediate move points
+        # 3. Intermediate move points (batch packed in memory)
         for pt in points[1:]:
             dx, dy = self.display_to_digitizer(*pt)
-            d = bytearray()
-            d += self.pack_event(EV_ABS, ABS_X, dx)
-            d += self.pack_event(EV_ABS, ABS_Y, dy)
-            d += self.pack_event(EV_ABS, ABS_PRESSURE, pressure)
-            d += self.pack_event(EV_SYN, SYN_REPORT, 0)
-            self.proc.stdin.write(d)
-            self.proc.stdin.flush()
-            time.sleep(0.003)
+            data += self.pack_event(EV_ABS, ABS_X, dx)
+            data += self.pack_event(EV_ABS, ABS_Y, dy)
+            data += self.pack_event(EV_ABS, ABS_PRESSURE, pressure)
+            data += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
         # 4. Touch Up
-        data_up = bytearray()
-        data_up += self.pack_event(EV_ABS, ABS_PRESSURE, 0)
-        data_up += self.pack_event(EV_KEY, BTN_TOUCH, 0)
-        data_up += self.pack_event(EV_ABS, ABS_DISTANCE, 50)
-        data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
+        data += self.pack_event(EV_ABS, ABS_PRESSURE, 0)
+        data += self.pack_event(EV_KEY, BTN_TOUCH, 0)
+        data += self.pack_event(EV_ABS, ABS_DISTANCE, 50)
+        data += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
         # 5. Tool Proximity Out
-        data_up += self.pack_event(EV_KEY, tool, 0)
-        data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
+        data += self.pack_event(EV_KEY, tool, 0)
+        data += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
-        self.proc.stdin.write(data_up)
+        # Deliver the complete stroke in one single buffer without per-point sleeping
+        self.proc.stdin.write(data)
         self.proc.stdin.flush()
-        time.sleep(0.006)
+        time.sleep(0.005)
 
 
 DIGIT_SEGMENTS = {
@@ -792,7 +784,7 @@ DIGIT_SEGMENTS = {
 }
 
 class SevenSegmentDigit:
-    """Manages full-digit box wiping and clean redrawing for 7-segment characters."""
+    """Manages high-speed minimal delta segment erasing and redrawing."""
     def __init__(self, stylus, top_left_x, top_left_y, width=95, height=175, thickness=10):
         self.stylus = stylus
         self.x = top_left_x
@@ -802,15 +794,15 @@ class SevenSegmentDigit:
         self.t = max(4, thickness)
         self.mid_y = top_left_y + height // 2
         self.current_char = None
-        self.draw_coords = self._compute_segment_coords()
+        self.draw_coords, self.erase_coords = self._compute_segment_coords()
         self.box_eraser_coords = self._compute_box_eraser_coords()
 
     def _compute_box_eraser_coords(self):
-        # 5 vertical lanes covering the full digit bounding box with dense steps
         x, y, w, h = self.x, self.y, self.w, self.h
-        pad_y = 10
-        x_lanes = [x - 4, x + int(w * 0.25), x + int(w * 0.50), x + int(w * 0.75), x + w + 4]
-        steps = 15
+        pad_x = 10
+        pad_y = 12
+        x_lanes = list(range(x - pad_x, x + w + pad_x + 1, 10))
+        steps = 8
         pts = []
         for lane_idx, lx in enumerate(x_lanes):
             y1, y2 = y - pad_y, y + h + pad_y
@@ -824,11 +816,12 @@ class SevenSegmentDigit:
         x, y, w, h, m = self.x, self.y, self.w, self.h, self.mid_y
         draw_gap = 8
 
-        def h_bar(y_pos):
-            x1, x2 = x + draw_gap, x + w - draw_gap
+        def h_bar(y_pos, is_erase=False):
+            pad = 6 if is_erase else 0
+            x1, x2 = x + draw_gap - pad, x + w - draw_gap + pad
             steps = 4
             pts = []
-            offsets = [-4, -1, 2, 5]
+            offsets = [-10, -6, -2, 2, 6, 10] if is_erase else [-4, -1, 2, 5]
             for pass_idx, off in enumerate(offsets):
                 y_curr = y_pos + off
                 if pass_idx % 2 == 0:
@@ -837,11 +830,12 @@ class SevenSegmentDigit:
                     pts.extend([(int(x2 - (x2 - x1) * i / steps), y_curr) for i in range(steps + 1)])
             return pts
 
-        def v_bar(x_pos, y_start, y_end):
-            y1, y2 = y_start + draw_gap, y_end - draw_gap
+        def v_bar(x_pos, y_start, y_end, is_erase=False):
+            pad = 6 if is_erase else 0
+            y1, y2 = y_start + draw_gap - pad, y_end - draw_gap + pad
             steps = 4
             pts = []
-            offsets = [-4, -1, 2, 5]
+            offsets = [-10, -6, -2, 2, 6, 10] if is_erase else [-4, -1, 2, 5]
             for pass_idx, off in enumerate(offsets):
                 x_curr = x_pos + off
                 if pass_idx % 2 == 0:
@@ -850,37 +844,64 @@ class SevenSegmentDigit:
                     pts.extend([(x_curr, int(y2 - (y2 - y1) * i / steps)) for i in range(steps + 1)])
             return pts
 
-        return {
-            'A': h_bar(y),
-            'B': v_bar(x + w, y, m),
-            'C': v_bar(x + w, m, y + h),
-            'D': h_bar(y + h),
-            'E': v_bar(x, m, y + h),
-            'F': v_bar(x, y, m),
-            'G': h_bar(m),
+        draw_map = {
+            'A': h_bar(y, False),
+            'B': v_bar(x + w, y, m, False),
+            'C': v_bar(x + w, m, y + h, False),
+            'D': h_bar(y + h, False),
+            'E': v_bar(x, m, y + h, False),
+            'F': v_bar(x, y, m, False),
+            'G': h_bar(m, False),
         }
+        erase_map = {
+            'A': h_bar(y, True),
+            'B': v_bar(x + w, y, m, True),
+            'C': v_bar(x + w, m, y + h, True),
+            'D': h_bar(y + h, True),
+            'E': v_bar(x, m, y + h, True),
+            'F': v_bar(x, y, m, True),
+            'G': h_bar(m, True),
+        }
+        return draw_map, erase_map
 
     def transition_to(self, char):
         if self.current_char == char:
             return 0
 
-        # 1. If updating an existing character, wipe its bounding box completely
-        if self.current_char is not None:
-            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3500)
-            time.sleep(0.15)  # 150ms buffer for xochitl to commit eraser clipping
-
-        # 2. Draw all active segments for the new character fresh and bold
         target_segments = DIGIT_SEGMENTS.get(char, set())
-        for seg in target_segments:
-            coords = self.draw_coords[seg]
-            self.stylus.stroke(coords, is_eraser=False, pressure=3900)
+
+        if self.current_char is None:
+            # First initialization: draw all segments for this character
+            for seg in target_segments:
+                self.stylus.stroke(self.draw_coords[seg], is_eraser=False, pressure=3900)
+            self.current_char = char
+            return 1
+
+        # Minimal delta: only touch what changes!
+        old_segments = DIGIT_SEGMENTS.get(self.current_char, set())
+        to_erase = old_segments - target_segments
+        to_draw = target_segments - old_segments
+
+        # 1. Erase only segments that turn off (wide 22px swath)
+        for seg in to_erase:
+            self.stylus.stroke(self.erase_coords[seg], is_eraser=True, pressure=4000)
+
+        if to_erase and to_draw:
+            time.sleep(0.04)
+
+        # 2. Draw only segments that turn on
+        for seg in to_draw:
+            self.stylus.stroke(self.draw_coords[seg], is_eraser=False, pressure=3900)
 
         self.current_char = char
-        return 1
+        return len(to_erase) + len(to_draw)
 
     def clear(self):
         if self.current_char is not None:
-            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=3500)
+            old_segments = DIGIT_SEGMENTS.get(self.current_char, set())
+            for seg in old_segments:
+                self.stylus.stroke(self.erase_coords[seg], is_eraser=True, pressure=4000)
+            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=4000)
             self.current_char = None
 
 
@@ -979,63 +1000,76 @@ class DigitalClock:
             add_digit()
             add_digit()
 
-    def run(self, duration=None, clear_on_exit=False, once=False, interval=1):
+    def run(self, duration=None, clear_on_exit=False, once=False, interval=1.0, slow=None, step=1):
+        step_delay = float(slow if slow is not None else interval)
+        is_slow_mode = (step_delay > 1.0)
+
         print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos} (size: {self.w}x{self.h})", flush=True)
         self.stylus.connect()
         try:
-            # Draw bold stationary colons once
+            # 1. Clean previous strokes in the clock zone so old numbers don't overlap
+            print("🧹 Preparing clean screen area...", flush=True)
+            for d in self.digits:
+                self.stylus.stroke(d.box_eraser_coords, is_eraser=True, pressure=3800)
+            time.sleep(0.2)
+
+            # 2. Draw bold stationary colons once
             for dots in self.colon_coords:
                 self.stylus.stroke(dots, is_eraser=False, pressure=3900)
 
+            # 3. Determine starting time
             now = datetime.now()
-            if interval > 1:
-                rounded_sec = (now.second // interval) * interval
-                time_str = f"{now.minute:02d}{rounded_sec:02d}" if self.format == "MM:SS" else f"{now.hour:02d}{now.minute:02d}{rounded_sec:02d}"
+            if is_slow_mode:
+                # Start at round :00 so test steps 1..9 isolate the single unit seconds digit
+                sim_time = now.replace(second=0)
             else:
-                time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+                sim_time = now
 
-            total_changes = 0
+            time_str = sim_time.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+
+            # 4. Draw initial digits
             for digit, char in zip(self.digits, time_str):
-                changes = digit.transition_to(char)
-                total_changes += changes
+                digit.transition_to(char)
             display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
             print(f"⏰ Time drawn: [{display_str}] at {self.pos}.", flush=True)
 
             if once:
                 return
 
-            print(f"⚡ Update interval: {interval}s (wiping and redrawing only changed digits).", flush=True)
+            if is_slow_mode:
+                print(f"⏳ Slow-motion test mode: advancing {step} second every {step_delay:.1f}s.", flush=True)
+                print(f"   Only the single changing digit will be erased and redrawn so you can observe clearly.", flush=True)
+            else:
+                print(f"⚡ Live clock active: updating every {step_delay:.1f}s.", flush=True)
             print(f"💡 Make sure a notebook page is open on your tablet screen.", flush=True)
             print(f"   Press Ctrl+C to stop.\n", flush=True)
 
             start_time = time.time()
-            last_sec = time_str
+            step_count = 0
             while True:
-                now = datetime.now()
-                if interval > 1:
-                    rounded_sec = (now.second // interval) * interval
-                    time_str = f"{now.minute:02d}{rounded_sec:02d}" if self.format == "MM:SS" else f"{now.hour:02d}{now.minute:02d}{rounded_sec:02d}"
-                else:
-                    time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+                time.sleep(step_delay)
+                step_count += 1
 
-                if time_str != last_sec:
-                    last_sec = time_str
-                    total_changes = 0
-                    for digit, char in zip(self.digits, time_str):
-                        changes = digit.transition_to(char)
-                        total_changes += changes
-                    display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
-                    print(f"  [{display_str}] Digits updated: {total_changes}", flush=True)
+                if is_slow_mode:
+                    sim_time += timedelta(seconds=step)
+                    new_time_str = sim_time.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+                else:
+                    now = datetime.now()
+                    new_time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+
+                if new_time_str != time_str:
+                    display_str = f"{new_time_str[:2]}:{new_time_str[2:]}" if self.format == "MM:SS" else f"{new_time_str[:2]}:{new_time_str[2:4]}:{new_time_str[4:]}"
+                    changed_indices = [i for i, (c1, c2) in enumerate(zip(time_str, new_time_str)) if c1 != c2]
+
+                    for idx in changed_indices:
+                        self.digits[idx].transition_to(new_time_str[idx])
+
+                    time_str = new_time_str
+                    print(f"  [{display_str}] Step #{step_count}: updated digit(s) {changed_indices} -> '{time_str}'", flush=True)
 
                 if duration and (time.time() - start_time) >= duration:
                     print(f"\n⏱️ Duration of {duration}s reached.", flush=True)
                     break
-
-                now_t = time.time()
-                sleep_t = interval - (now_t % interval)
-                if sleep_t < 0.1:
-                    sleep_t += interval
-                time.sleep(sleep_t)
         except KeyboardInterrupt:
             print("\nClock stopped by user.", flush=True)
         finally:
@@ -1044,7 +1078,7 @@ class DigitalClock:
                 for d in self.digits:
                     d.clear()
                 for dots in self.colon_coords:
-                    self.stylus.stroke(dots, is_eraser=True, pressure=3500)
+                    self.stylus.stroke(dots, is_eraser=True, pressure=3800)
             self.stylus.close()
             print("Virtual stylus disconnected.", flush=True)
 
@@ -1052,7 +1086,7 @@ class DigitalClock:
 def cmd_clock(args):
     host = get_active_host(args.device)
     clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size)
-    clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once, interval=args.interval)
+    clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once, interval=args.interval, slow=args.slow, step=args.step)
 
 
 def cmd_draw(args):
@@ -1133,7 +1167,9 @@ def main():
     p_clock.add_argument("--size", "-s", type=str, default=None, choices=["small", "medium", "large", "xlarge"], help="Clock size preset")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
-    p_clock.add_argument("--interval", "-i", type=int, default=1, help="Update interval in seconds (e.g. 5 for test)")
+    p_clock.add_argument("--interval", "-i", type=float, default=1.0, help="Update interval in seconds (e.g. 5 for slow test)")
+    p_clock.add_argument("--slow", type=float, default=None, help="Slow-motion test delay in seconds: wait N seconds per 1-second increment (e.g. --slow 5)")
+    p_clock.add_argument("--step", type=int, default=1, help="Number of seconds to advance per update (default: 1)")
     p_clock.add_argument("--once", "-1", action="store_true", help="Draw current time once and exit immediately")
     p_clock.add_argument("--clear", action="store_true", help="Erase the clock from screen on exit")
     p_clock.set_defaults(func=cmd_clock)
