@@ -71,7 +71,7 @@ def main():
                 c_target.mkdir(parents=True, exist_ok=True)
                 for f in claude_cmd_dir.glob("*.md"):
                     shutil.copy2(f, c_target / f.name)
-                print(f"   [Claude Code] Installed slash commands (/rm-list, /rm-read, /rm-tasks) to: {c_target}")
+                print(f"   [Claude Code] Installed slash commands (/rm-list, /rm-read, /rm-tasks, /rm-devices, /rm-export, /rm-push) to: {c_target}")
             except Exception as e:
                 print(f"   [Claude Code] Notice: {e}")
 
@@ -98,7 +98,7 @@ def main():
     print("\nHow to use:")
     print("  • Terminal CLI:       rm-ai list, rm-ai read, rm-ai devices")
     print("  • Antigravity/Gemini: Ask naturally: 'Read page 5 of D-Wave' or 'List notebooks'")
-    print("  • Claude Code:        Use slash commands: /rm-list, /rm-read, /rm-tasks\n")
+    print("  • Claude Code:        Use slash commands: /rm-list, /rm-read, /rm-tasks, /rm-devices, /rm-export, /rm-push\n")
 
 if __name__ == "__main__":
     main()
