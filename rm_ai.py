@@ -186,6 +186,10 @@ def cmd_read(args):
         # AI Analysis
         analyze_with_ai(local_png, action=args.action or "summarize", prompt=args.prompt)
 
+    if not args.save:
+        print("[Auto-cleanup] Temporary render files cleanly deleted from disk.")
+
+
 def analyze_with_ai(image_path, action="summarize", prompt=None):
     from google import genai
     from PIL import Image
