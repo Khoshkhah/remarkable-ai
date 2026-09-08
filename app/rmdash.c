@@ -346,6 +346,11 @@ static void stamp_text(int size, int bold, int x, int y, int gray, const char *s
         x += g->adv;
     }
 }
+static int stamp_width(int size, int bold, const char *s) {
+    struct atlas *a = font(size, bold); int w = 0;
+    if (a) for (const unsigned char *c = (const unsigned char *)s; *c; c++) w += a->g[*c].adv;
+    return w;
+}
 static void stamp_rect(int x0, int y0, int x1, int y1, int gray) {
     for (int y = y0; y < y1 && y < SH; y++) for (int x = x0; x < x1 && x < SW; x++) if (x >= 0 && y >= 0) simg[y * SW + x] = (unsigned char)gray;
 }
@@ -490,6 +495,9 @@ static int compose_sleep(void) {
         }
     }
     strftime(s, sizeof s, "Updated: %Y-%m-%d %H:%M", &lt); stamp_text(20, 0, 1080, 1735, 0, s);
+    strftime(s, sizeof s, "%H:%M", &lt);                          /* the time this screen was painted, next to the date */
+    stamp_text(22, 1, 1324 - stamp_width(22, 1, "AS OF"), 228, 110, "AS OF");
+    stamp_text(64, 1, 1324 - stamp_width(64, 1, s), 260, 0, s);
     char tmp[620]; snprintf(tmp, sizeof tmp, "%s.tmp", sleep_png);
     if (!write_png(tmp) || rename(tmp, sleep_png)) { fprintf(stderr, "could not write the sleep screen\n"); return 0; }
     fprintf(stderr, "sleep screen painted for %s\n", day);
@@ -644,7 +652,7 @@ int main(int argc, char **argv) {
                 }
             }
             if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); sleep_due = 1; }   /* keeps the printed weather fresh */
-            if (sleep_due && time(NULL) - slept >= 15 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
+            if (sleep_due && time(NULL) - slept >= 4 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
             if (!is_open) give_back_the_pen(doc);
             swap_daily_page();
             sleep(2);
@@ -693,7 +701,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "data fetched in %.1f s\n", (now_us() - t0) / 1e6);
             continue;
         }
-        if (sleep_due && time(NULL) - slept >= 15 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
+        if (sleep_due && time(NULL) - slept >= 4 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
         long wait = 60 - (long)(time(NULL) % 60);
         while (wait > 0 && page_on_screen()) { nap(2000000); wait -= 2; }
     }

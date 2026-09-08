@@ -1639,7 +1639,7 @@ GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 40: "ABCDEFGHIJKLMNOPQRSTUV
 DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to compose and swap in by itself
 
 
-SLEEP_FONTS = ((22, True), (96, True), (32, True), (22, False), (18, True), (15, False), (20, False))   # what the tablet stamps with
+SLEEP_FONTS = ((22, True), (96, True), (32, True), (22, False), (18, True), (15, False), (20, False), (64, True))   # what the tablet stamps with
 SLEEP_CHARS = "".join(chr(c) for c in range(32, 127)) + "°•"
 
 
