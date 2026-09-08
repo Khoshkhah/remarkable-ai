@@ -1763,35 +1763,40 @@ def stroke_glyph(ch, size, advance):
     return [[(left + x * k, 0.2 * size + y * k) for x, y in stroke] for stroke in strokes]
 
 
-ERASE_OFFSETS = (-10, -3.5, 3.5, 10)   # eraser passes along a stroke, sideways offsets in px: the pen overshoots
-                                        # the path by a few px at the outside of curves, the eraser cuts the corner
-SWEEP_LANE = 6               # lanes of a zone sweep: the eraser only takes a point of a wide stroke when it
-                             # passes within a few px of the stroke's centreline (measured with a 27 px ballpoint)
+ERASE_OFFSETS = (-10, -5, 0, 5, 10)   # eraser passes along a stroke, sideways offsets in px: the pen overshoots the
+                                      # path by a few px at the outside of curves, the eraser cuts the corner
+ERASE_STEP_PX = 8                     # the eraser moves twice as fast as the pen: no ink to lay down, and the medium
+                                      # eraser (~17 px) still overlaps itself at that step
+SWEEP_LANE = 6                        # lanes of a zone sweep: the eraser only takes a point of a wide stroke when it
+                                      # passes within a few px of the stroke's centreline (measured with a 27 px ballpoint)
 
 
-def erase_paths(path, ext=6):
-    """Eraser passes that take a pen stroke drawn along `path` out again, whatever pen it was: along the
-    stroke itself and offset sideways, run `ext` px past both ends (the pen's round caps)."""
-    pts = [(float(x), float(y)) for x, y in path]
-    if len(pts) < 2:
-        return []
-    if len(pts) == 2 and pts[0] == pts[1]:
-        pts = [pts[0], (pts[0][0] + 1, pts[0][1])]
-    (x0, y0), (x1, y1) = pts[0], pts[1]
-    d = math.hypot(x1 - x0, y1 - y0) or 1
-    pts[0] = (x0 - (x1 - x0) / d * ext, y0 - (y1 - y0) / d * ext)
-    (x0, y0), (x1, y1) = pts[-2], pts[-1]
-    d = math.hypot(x1 - x0, y1 - y0) or 1
-    pts[-1] = (x1 + (x1 - x0) / d * ext, y1 + (y1 - y0) / d * ext)
+def erase_path(paths, ext=6):
+    """One continuous eraser stroke that takes the pen strokes drawn along `paths` out again, whatever
+    pen it was: for every stroke, passes along it at ERASE_OFFSETS sideways, chained end to end (each
+    pass returns the way the previous one went), run `ext` px past the ends (the pen's round caps).
+    One stroke, so the app's pause after every eraser stroke is paid once per glyph, not per pass."""
     out = []
-    for k, off in enumerate(ERASE_OFFSETS):
-        shifted = []
-        for i, (x, y) in enumerate(pts):
-            (ax, ay), (bx, by) = pts[max(0, i - 1)], pts[min(len(pts) - 1, i + 1)]
-            tx, ty = bx - ax, by - ay
-            n = math.hypot(tx, ty) or 1
-            shifted.append((x - ty / n * off, y + tx / n * off))
-        out.append(shifted if k % 2 == 0 else shifted[::-1])
+    for path in paths:
+        pts = [(float(x), float(y)) for x, y in path]
+        if len(pts) < 2:
+            continue
+        if len(pts) == 2 and pts[0] == pts[1]:
+            pts = [pts[0], (pts[0][0] + 1, pts[0][1])]
+        (x0, y0), (x1, y1) = pts[0], pts[1]
+        d = math.hypot(x1 - x0, y1 - y0) or 1
+        pts[0] = (x0 - (x1 - x0) / d * ext, y0 - (y1 - y0) / d * ext)
+        (x0, y0), (x1, y1) = pts[-2], pts[-1]
+        d = math.hypot(x1 - x0, y1 - y0) or 1
+        pts[-1] = (x1 + (x1 - x0) / d * ext, y1 + (y1 - y0) / d * ext)
+        for k, off in enumerate(ERASE_OFFSETS):
+            shifted = []
+            for i, (x, y) in enumerate(pts):
+                (ax, ay), (bx, by) = pts[max(0, i - 1)], pts[min(len(pts) - 1, i + 1)]
+                tx, ty = bx - ax, by - ay
+                n = math.hypot(tx, ty) or 1
+                shifted.append((x - ty / n * off, y + tx / n * off))
+            out += shifted if k % 2 == 0 else shifted[::-1]
     return out
 
 
@@ -1811,9 +1816,9 @@ def bake_dash_app(out):
             for path in paths:
                 rec.stroke(path, pressure=4000)
             (out / f"g{size}_{ord(ch)}.bin").write_bytes(rec.take())
-            for path in paths:
-                for p in erase_paths(path):
-                    rec.stroke(p, is_eraser=True, pressure=4000)
+            rec.STEP_PX = ERASE_STEP_PX
+            rec.stroke(erase_path(paths), is_eraser=True, pressure=4000)
+            rec.STEP_PX = VirtualStylus.STEP_PX
             (out / f"e{size}_{ord(ch)}.bin").write_bytes(rec.take())
     (out / "glyphs").write_text("\n".join(lines) + "\n")
     for name, zone in TABLET_DASH_LAYOUT["zones"].items():
@@ -1822,8 +1827,9 @@ def bake_dash_app(out):
     for i, (x0, x1, y) in enumerate(TABLET_DASH_LAYOUT["bars"]):
         rec.stroke([(x0, y), (x1, y)], pressure=4000)
         (out / f"bar{i}.bin").write_bytes(rec.take())
-        for p in erase_paths([(x0, y), (x1, y)]):
-            rec.stroke(p, is_eraser=True, pressure=4000)
+        rec.STEP_PX = ERASE_STEP_PX
+        rec.stroke(erase_path([[(x0, y), (x1, y)]]), is_eraser=True, pressure=4000)
+        rec.STEP_PX = VirtualStylus.STEP_PX
         (out / f"ebar{i}.bin").write_bytes(rec.take())
     layout = [f"base {gx} {gy}"]
     layout += [f"zone {n} {x0} {y0} {x1} {y1}" for n, (x0, y0, x1, y1) in TABLET_DASH_LAYOUT["zones"].items()]

@@ -150,11 +150,11 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
             assert all(f"g{size}_{ord(c)}.bin" in names for c in chars), size
         assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])
         assert {"bar0.bin", "bar1.bin", "bar2.bin", "ebar0.bin", "e190_48.bin", "e40_65.bin", "layout", "glyphs"} <= names
-        # the eraser of a glyph runs along the same strokes, three passes each, as eraser strokes
+        # the eraser of a glyph is one eraser stroke zigzagging along all its strokes at every offset
         erase = events((out / "e190_49.bin").read_bytes())
-        assert sum(1 for t, c, v in erase if t == rm_ai.EV_KEY and c == rm_ai.BTN_TOOL_RUBBER and v == 1) == len(rm_ai.ERASE_OFFSETS) * len(rm_ai.STROKE_FONT["1"][1])
-        passes = rm_ai.erase_paths([(0, 0), (100, 0)])
-        assert len(passes) == len(rm_ai.ERASE_OFFSETS) and passes[0][0][0] == -6 and {round(p[0][1], 1) for p in passes} == {-10, -3.5, 3.5, 10}
+        assert sum(1 for t, c, v in erase if t == rm_ai.EV_KEY and c == rm_ai.BTN_TOOL_RUBBER and v == 1) == 1
+        path = rm_ai.erase_path([[(0, 0), (100, 0)]])
+        assert len(path) == 2 * len(rm_ai.ERASE_OFFSETS) and path[0] == (-6, -10) and path[-1][1] == 10 and path[1][0] == 106
         glyphs = {(int(a), int(b)): float(c) for a, b, c in (l.split() for l in (out / "glyphs").read_text().splitlines())}
         assert glyphs[(40, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(40, ord("0"))]
         layout = (out / "layout").read_text()
