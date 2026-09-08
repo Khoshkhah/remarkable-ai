@@ -230,6 +230,16 @@ static int page_on_screen(void) {
     return doc_running && doc_open(watched_doc);
 }
 
+static int home_screen(void) {   /* no document open: LastOpen=@ByteArray() */
+    FILE *f = fopen(CONF, "r");
+    if (!f) return 0;
+    char line[512]; int home = 0;
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, "LastOpen=", 9)) { home = strstr(line, "()") != NULL; break; }
+    fclose(f);
+    return home;
+}
+
 static int doc_open(const char *doc) {   /* xochitl keeps the open document's uuid in its config, empty on the home screen */
     FILE *f = fopen(CONF, "r");
     if (!f) return 0;

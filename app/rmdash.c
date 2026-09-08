@@ -15,7 +15,7 @@
 
 #define NZ 8
 static const char *ZONES[NZ] = {"clock", "date", "caltitle", "cal", "row0", "row1", "row2", "weather"};
-static char doc[64], rmfile[600], city[64], tmpv[128];
+static char doc[64], rmfile[600], pdf[600], city[64], tmpv[128];
 static double lat = 0, lon = 0;
 static long minutes = 15;
 static int base_x = 300, base_y = 300;
@@ -25,6 +25,7 @@ static struct text texts[40]; static int ntexts = 0;
 static struct { int x0, x1, y; } bars[3];
 static struct { int x0, y0, col, row; } cal;
 static struct { int size; double adv[256]; } gl[8]; static int ngl = 0;
+static int zone_on[NZ];   /* a zone is drawn only if its sweep was baked: the layout decides what the pen owns */
 
 static struct text *T(const char *name) { for (int i = 0; i < ntexts; i++) if (!strcmp(texts[i].name, name)) return &texts[i]; return NULL; }
 
@@ -226,6 +227,7 @@ static void fetch_usage(void) {
 static void upper(char *s) { for (; *s; s++) if (*s >= 'a' && *s <= 'z') *s -= 32; }
 
 static void want_all(char want[NZ][512], struct tm *lt) {
+    for (int z = 0; z < NZ; z++) want[z][0] = 0;
     strftime(want[0], 512, "%H:%M", lt);
     strftime(want[1], 512, "%A, %B %d, %Y", lt); upper(want[1]);
     strftime(want[2], 512, "%B %Y", lt); upper(want[2]);
@@ -238,7 +240,8 @@ static void want_all(char want[NZ][512], struct tm *lt) {
         char dow[8], hm[8]; strftime(dow, sizeof dow, "%a", &rt); upper(dow); strftime(hm, sizeof hm, "%H:%M", &rt);
         snprintf(want[4 + i], 512, "%d|%s|%s", atoi(pct), r ? dow : "", r ? hm : "");
     }
-    if (!wx.ok) { want[7][0] = 0; return; }
+    for (int z = 0; z < NZ; z++) if (!zone_on[z]) want[z][0] = 0;
+    if (!wx.ok || !zone_on[7]) { want[7][0] = 0; return; }
     int n = 0;
     n += snprintf(want[7] + n, 512 - n, "%.0f\xB0|%s|H %.0f\xB0  L %.0f\xB0", wx.temp, WMO(wx.code), wx.dmax[0], wx.dmin[0]);
     if (wx.dpop[0] > -999) n += snprintf(want[7] + n, 512 - n, "  rain %.0f%%", wx.dpop[0]);
@@ -290,6 +293,26 @@ static void draw_zone(int z, const char *want, struct tm *lt) {
     }
 }
 
+/* The printed part of the page (date, calendar) is a stock of PDFs the installer left, one per day:
+ * on a new day, while nothing is open on the tablet, today's page replaces the document's PDF and
+ * xochitl is restarted so it shows it. The pen strokes on the page are kept: they belong to the .rm. */
+static void swap_daily_page(void) {
+    char today[16], printed[32] = "", src[700], cmd[1600];
+    time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
+    strftime(today, sizeof today, "%Y-%m-%d", &lt);
+    char ppath[600]; snprintf(ppath, sizeof ppath, "%s/printed", dir);
+    FILE *f = fopen(ppath, "r"); if (f) { if (fgets(printed, sizeof printed, f)) printed[strcspn(printed, "\r\n")] = 0; fclose(f); }
+    if (!strcmp(printed, today) || !pdf[0]) return;
+    snprintf(src, sizeof src, "%s/pages/%s.pdf", dir, today);
+    if (access(src, R_OK)) { static int said = 0; if (!said++) fprintf(stderr, "no printed page for %s in the stock\n", today); return; }
+    if (!home_screen()) return;                       /* only between documents: the restart reloads the tablet's app */
+    snprintf(cmd, sizeof cmd, "cp '%s' '%s'", src, pdf);
+    if (system(cmd) != 0) { fprintf(stderr, "could not install the page for %s\n", today); return; }
+    f = fopen(ppath, "w"); if (f) { fputs(today, f); fclose(f); }
+    fprintf(stderr, "printed page for %s installed, restarting xochitl\n", today);
+    if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
+}
+
 static void save_state(char shown[NZ][512], long rm_mtime) {
     char path[600]; snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "w"); if (!f) return;
@@ -304,12 +327,14 @@ int main(int argc, char **argv) {
     parse_dev_args(argc, argv);
     if (!read_kv("config", "doc", doc, sizeof doc)) { fprintf(stderr, "config: no doc=\n"); return 1; }
     read_kv("config", "rm", rmfile, sizeof rmfile);
+    read_kv("config", "pdf", pdf, sizeof pdf);
     read_kv("config", "city", city, sizeof city);
     if (read_kv("config", "lat", tmpv, sizeof tmpv)) lat = atof(tmpv);
     if (read_kv("config", "lon", tmpv, sizeof tmpv)) lon = atof(tmpv);
     if (read_kv("config", "minutes", tmpv, sizeof tmpv)) minutes = atol(tmpv);
     if (minutes < 1) minutes = 1;
     read_layout();
+    for (int z = 0; z < NZ; z++) { char p[600]; snprintf(p, sizeof p, "%s/sweep_%s.bin", dir, ZONES[z]); zone_on[z] = !access(p, R_OK); }
     use_pc_timezone();
     setvbuf(stderr, NULL, _IOLBF, 0);
     journal_start(doc);
@@ -335,6 +360,7 @@ int main(int argc, char **argv) {
                     save_state(shown, mtime(rmfile));
                 }
             }
+            swap_daily_page();
             sleep(2);
             continue;
         }
@@ -354,7 +380,7 @@ int main(int argc, char **argv) {
             ink_reset(&ink, rmfile);
             if (page_lost) continue;
         }
-        if (time(NULL) - fetched >= minutes * 60) { fetch_weather(); fetch_usage(); fetched = time(NULL); }
+        if (time(NULL) - fetched >= minutes * 60) { if (zone_on[7]) fetch_weather(); fetch_usage(); fetched = time(NULL); }
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
         int changed[NZ], any = 0; char name[32];

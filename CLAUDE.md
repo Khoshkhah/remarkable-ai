@@ -137,9 +137,15 @@ services before any push, and `dashboard --install --no-push` reuses the page wi
 `rmclock <dir> [xochitl.conf] [event device]` so a dry run on the PC against a plain file works.
 
 **Tablet-resident dashboard** (`dashboard --install`, `app/rmdash.c`, shares `app/stylus.h` with the
-clock): `render_dashboard_image(live="tablet")` prints labels only; `TABLET_DASH_LAYOUT` is the single
-source of zones (erased whole when a value in them changes), text origins, bars and calendar cells,
-written to the tablet as `layout`. `bake_dash_app()` records every glyph of `GLYPH_SETS` once at
+clock): the page is the live template with a printed weather header only (`render_dashboard_image(live=True,
+pen_weather=True, now=day)`); `render_dash_pages()` renders it for the next `DASH_STOCK_DAYS` days into
+`pages/YYYY-MM-DD.pdf` and rmdash's `swap_daily_page()` copies the day's page over the document's PDF
+and restarts xochitl, only while no document is open (`home_screen()`); the pen strokes live in the
+`.rm` and survive the swap; the PC's standby cron tops the stock up (`top_up_dash_pages`, no reload).
+`TABLET_DASH_LAYOUT` is the single source of the pen-owned zones (clock, the three usage rows, the
+weather values; erased whole when a value in them changes), text origins and bars, written to the
+tablet as `layout`; rmdash draws only zones whose sweep file exists, so enabling the date/calendar
+zones is a layout change (the C code for them is there). `bake_dash_app()` records every glyph of `GLYPH_SETS` once at
 `GLYPH_BASE` with `text_strokes()` (one file per glyph and size, advance widths in `glyphs`), the zone
 sweeps, full-length bars (truncated by the program at the percentage) and the today ring; rmdash shifts
 glyph events by a display-px offset converted to digitizer units. Data: Open-Meteo directly, Claude

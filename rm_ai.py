@@ -1619,23 +1619,39 @@ def uninstall_clock_app(host):
 
 LIVE_USAGE_ROWS = (1000, 1190, 1380)  # y of the three usage rows (label + bar; digits 40px below)
 LIVE_BAR_X = (278, 521)             # x extent of the bar interior the pen fills
+LIVE_CLOCK_ZONE = (66, 100, 800, 320)     # swept clean before each redraw of the big HH:MM (font 190 at 80,115)
 TABLET_DASH_DIR = "/home/root/.local/share/rmdash"
 GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmdash shifts it into place
-# Everything the tablet-resident dashboard draws (display px), the one source app/rmdash.c reads as `layout`.
-# zones are erased whole when any value in them changes; texts are (font size, x, y) of a text origin.
+# What the tablet-resident dashboard draws with the pen (display px): the time, the three usage rows
+# (as the live page does) and the weather values under the printed weather header. Date and calendar
+# are printed: the installer leaves a stock of pages for the coming days and the tablet swaps in the
+# day's page itself. The one source app/rmdash.c reads as `layout`; zones are erased whole when a value
+# in them changes; texts are (font size, x, y) of a text origin.
 TABLET_DASH_LAYOUT = {
-    "zones": {"clock": (66, 100, 800, 320), "date": (66, 318, 800, 392), "caltitle": (66, 412, 565, 466), "cal": (66, 505, 565, 890),
-              "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565), "weather": (620, 470, 1330, 965)},
-    "texts": {"clock": (190, 80, 115), "date": (44, 80, 330), "caltitle": (44, 80, 416), "cal": (30, 0, 0),
-              "pct0": (110, 105, 1045), "reset0": (44, 335, 1060), "pct1": (110, 105, 1235), "reset1": (44, 335, 1250),
+    "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565),
+              "weather": (620, 470, 1330, 965)},
+    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (44, 335, 1060), "pct1": (110, 105, 1235), "reset1": (44, 335, 1250),
               "pct2": (110, 105, 1425), "reset2": (44, 335, 1440),
               "temp": (96, 630, 478), "wtext": (44, 840, 500), "wline": (44, 630, 600),
               "fcdow": (44, 630, 660), "fctext": (44, 730, 660), "fctemp": (44, 1060, 660), "fcpop": (44, 1245, 660)},
     "bars": [(LIVE_BAR_X[0], LIVE_BAR_X[1], y + 13) for y in LIVE_USAGE_ROWS],
-    "cal": (104, 546, 66, 55),    # centre of the first calendar cell, column and row pitch (render_dashboard_image)
 }
-GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 96: "0123456789°-", 30: "0123456789",
+GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 96: "0123456789°-",
               44: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789°%/,.:-'"}
+DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to swap in by itself
+
+
+def render_dash_pages(out, city_name, tasks, days=DASH_STOCK_DAYS):
+    """The dashboard page for today and the coming `days`, as pages/YYYY-MM-DD.pdf; returns today's path."""
+    (out / "pages").mkdir(exist_ok=True)
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    first = None
+    for i in range(days + 1):
+        day = today + timedelta(days=i)
+        pdf = out / "pages" / f"{day.strftime('%Y-%m-%d')}.pdf"
+        render_dashboard_image(tasks=tasks, live=True, weather={"name": city_name} if city_name else None, now=day, pen_weather=True).save(pdf, "PDF", resolution=226.0)
+        first = first or pdf
+    return first
 
 
 def bake_dash_app(out, pen_width, ink_width, pressure):
@@ -1662,9 +1678,7 @@ def bake_dash_app(out, pen_width, ink_width, pressure):
     for i, (x0, x1, y) in enumerate(TABLET_DASH_LAYOUT["bars"]):
         rec.stroke([(x0, y), (x1, y)], pressure=pressure)
         (out / f"bar{i}.bin").write_bytes(rec.take())
-    rec.stroke([(gx + 22 * math.cos(2 * math.pi * i / 24), gy + 22 * math.sin(2 * math.pi * i / 24)) for i in range(25)], pressure=small)
-    (out / "ring.bin").write_bytes(rec.take())
-    layout = [f"base {gx} {gy}", "cal %d %d %d %d" % TABLET_DASH_LAYOUT["cal"]]
+    layout = [f"base {gx} {gy}"]
     layout += [f"zone {n} {x0} {y0} {x1} {y1}" for n, (x0, y0, x1, y1) in TABLET_DASH_LAYOUT["zones"].items()]
     layout += [f"text {n} {size} {x} {y}" for n, (size, x, y) in TABLET_DASH_LAYOUT["texts"].items()]
     layout += [f"bar {i} {x0} {x1} {y}" for i, (x0, x1, y) in enumerate(TABLET_DASH_LAYOUT["bars"])]
@@ -1713,17 +1727,14 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         token = f"access={creds['accessToken']}\nrefresh={creds['refreshToken']}\nexpires={int(creds.get('expiresAt', 0)) // 1000}\n"
     run_ssh("systemctl stop rmdash 2>/dev/null; true", host=host)   # never push (the app restarts) under a running program
     existing = next((nb["uuid"] for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
+    stock = Path(tempfile.mkdtemp())
+    today_pdf = render_dash_pages(stock, loc.get("name", ""), tasks)
     if no_push and existing:
         doc_uuid = existing
         print(f"📄 Keeping the '{doc_title}' page already on the tablet (no push, no reload)", flush=True)
     else:
-        page = render_dashboard_image(battery_info=get_tablet_battery_info(host=host), tasks=tasks, live="tablet", weather=weather)
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            pdf = f.name
-        page.save(pdf, "PDF", resolution=226.0)
         print(f"📄 Pushing the '{doc_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
-        doc_uuid = cmd_push(argparse.Namespace(file=pdf, folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
-        os.unlink(pdf)
+        doc_uuid = cmd_push(argparse.Namespace(file=str(today_pdf), folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
     content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
     pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
     page_id = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
@@ -1731,29 +1742,49 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         bake_dash_app(out, saved.get("pen_width", 12), saved.get("ink_width", 70), saved.get("pressure", 4000))
-        (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\nlat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\n"
-                                    f"city={loc.get('name', '')}\nminutes=15\n")
+        shutil.move(str(stock / "pages"), str(out / "pages"))
+        shutil.rmtree(stock, ignore_errors=True)
+        (out / "printed").write_text(datetime.now().strftime("%Y-%m-%d") if not (no_push and existing) else "unknown")
+        (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\npdf={REMOTE_PATH}/{doc_uuid}.pdf\n"
+                                    f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=15\n")
         if token:
             (out / "token").write_text(token)
             os.chmod(out / "token", 0o600)
-        else:
+        has_token = bool(token) or run_ssh(f"test -f {TABLET_DASH_DIR}/token && echo yes || true", host=host).strip() == "yes"
+        if not has_token:
             (out / "usage").write_text(usage_file_text(fetch_claude_subscription_usage()))
         if os.path.exists("/etc/localtime"):
             shutil.copy("/etc/localtime", out / "localtime")
         shutil.copy(binary, out / "rmdash")
         (out / "rmdash.service").write_text(RMCLOCK_UNIT.replace("rmclock", "rmdash").replace(TABLET_APP_DIR, TABLET_DASH_DIR)
                                             .replace("its Clock document", "its Dashboard page"))
-        print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes and the dashboard program on the tablet...", flush=True)
-        run_ssh(f"rm -rf {TABLET_DASH_DIR}; mkdir -p {TABLET_DASH_DIR}", host=host)
+        print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes, {DASH_STOCK_DAYS + 1} daily pages and the dashboard program on the tablet...", flush=True)
+        # a token the tablet has been renewing itself is newer than any copy on the PC: keep it unless one is given
+        run_ssh(f"[ -f {TABLET_DASH_DIR}/token ] && cp {TABLET_DASH_DIR}/token /tmp/rmdash.token; rm -rf {TABLET_DASH_DIR}; mkdir -p {TABLET_DASH_DIR}; "
+                f"[ -f /tmp/rmdash.token ] && mv /tmp/rmdash.token {TABLET_DASH_DIR}/token; true", host=host)
         tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
         subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_DASH_DIR} -xf -"], input=tar, check=True)
     run_ssh(f"chmod +x {TABLET_DASH_DIR}/rmdash && chmod 600 {TABLET_DASH_DIR}/token 2>/dev/null; mv {TABLET_DASH_DIR}/rmdash.service /etc/systemd/system/ && "
             "systemctl daemon-reload && systemctl enable rmdash >/dev/null 2>&1 && systemctl restart rmdash", host=host)
-    cfg["dash_app"] = {"feed": not token}
+    cfg["dash_app"] = {"feed": not has_token, "city": city, "tasks": [t for t, _ in tasks] if tasks else None}
     save_config(cfg)
-    how = "fetches its Claude usage itself" if token else "gets its Claude usage from this PC's dashboard cron (no tablet login given)"
-    print(f"✅ Dashboard installed: open '{doc_title}' on the tablet and it draws the time, date, calendar, weather"
-          f" and usage by itself; it {how}. Log: ssh {host} journalctl -u rmdash -f")
+    how = "fetches its Claude usage itself" if has_token else "gets its Claude usage from this PC's dashboard cron (no tablet login given)"
+    print(f"✅ Dashboard installed: open '{doc_title}' on the tablet and it draws the time, weather and usage by itself and"
+          f" swaps in each day's printed page (pages for {DASH_STOCK_DAYS} days on board); it {how}. Log: ssh {host} journalctl -u rmdash -f")
+
+
+def top_up_dash_pages(host, city, tasks):
+    """Keep the tablet's stock of printed dashboard pages DASH_STOCK_DAYS long (no reload; the tablet swaps them in)."""
+    have = set(run_ssh(f"ls {TABLET_DASH_DIR}/pages 2>/dev/null; true", host=host).split())
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        render_dash_pages(out, city, tasks)
+        new = [p for p in (out / "pages").iterdir() if p.name not in have]
+        if not new:
+            return
+        tar = subprocess.run(["tar", "-C", str(out), "-cf", "-"] + [f"pages/{p.name}" for p in new], capture_output=True, check=True).stdout
+        subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_DASH_DIR} -xf -"], input=tar, check=True)
+        print(f"📅 {len(new)} new daily pages added to the tablet dashboard's stock")
 
 
 def uninstall_dash_app(host):
@@ -2063,11 +2094,13 @@ def fetch_weather(city):
         return {"error": str(e)[:80]}
 
 
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False):
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False, now=None, pen_weather=False):
+    """`now` renders the page for another day (the tablet dashboard keeps a stock of coming days);
+    `pen_weather` prints only the weather header, the tablet draws the values (TABLET_DASH_LAYOUT)."""
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
-    now = datetime.now()
+    now = now or datetime.now()
 
     # 1. Top status bar
     draw.line([(80, 100), (1324, 100)], fill=0, width=2)
@@ -2085,9 +2118,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     draw.text((1060, 68), f"WEEK {week_num} • DAY {day_of_year}", font=f_top, fill=0)
 
     # 2. Hero Clock & Date
-    if live == "tablet":
-        pass   # the tablet-resident dashboard draws the time and the date itself (TABLET_DASH_LAYOUT)
-    elif live:
+    if live:
         # the live page leaves the top blank: the pen draws HH:MM there and updates it every minute
         draw.text((80, 325), now.strftime("%A, %B %d, %Y").upper(), font=get_font(38, bold=True), fill=0)
     elif clock:
@@ -2108,8 +2139,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     # 4. Left Column: Calendar
     f_sec = get_font(26, bold=True)
     cal_title = now.strftime("%B %Y").upper()
-    if live != "tablet":
-        draw.text((80, 425), cal_title, font=f_sec, fill=0)
+    draw.text((80, 425), cal_title, font=f_sec, fill=0)
     draw.line([(80, 465), (550, 465)], fill=0, width=2)
 
     days_hdr = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
@@ -2126,7 +2156,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     y_cal = 530
     for week in cal:
         for i, day in enumerate(week):
-            if day != 0 and live != "tablet":   # the tablet draws the day numbers and today's ring itself
+            if day != 0:
                 cx = start_x + i * col_w + 24
                 cy = y_cal + 16
                 if day == now.day:
@@ -2142,16 +2172,12 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     # Claude API usage, just under the calendar (fits the 6-row months too)
     y_use = y_cal + 8
-    if live == "tablet":
-        pass   # the space under the calendar is the tablet's; it holds no spend line
-    elif claude_usage is None:
-        draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
+    draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
+    if claude_usage is None:
         draw.text((250, y_use), "spend needs ANTHROPIC_ADMIN_KEY", font=get_font(18), fill=110)
     elif "error" in claude_usage:
-        draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
         draw.text((250, y_use), f"unavailable: {claude_usage['error'][:34]}", font=get_font(18), fill=110)
     else:
-        draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
         u = claude_usage
         draw.text((250, y_use), f"{now.strftime('%b').upper()} ${u['month_usd']:.2f}  •  TODAY ${u['today_usd']:.2f}", font=get_font(20, bold=True), fill=0)
         draw.text((80, y_use + 28), f"last 30 days: {u['tokens_in'] / 1e6:.1f}M tokens in  •  {u['tokens_out'] / 1e6:.2f}M out", font=get_font(18), fill=0)
@@ -2216,8 +2242,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     # 5. Right Column: weather (when a city is set), then priorities, then ruled notes (only without weather)
     y_task = 490
-    if live == "tablet":
-        # printed header only: the tablet draws the temperature, the conditions and the forecast rows
+    if pen_weather:
         draw.text((630, 425), f"WEATHER  •  {(weather or {}).get('name', '').upper()}".rstrip(" •"), font=f_sec, fill=0)
         draw.line([(630, 465), (1324, 465)], fill=0, width=2)
         draw.text((630, 980), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
@@ -2369,7 +2394,6 @@ def open_document(host):
         return None
 
 
-LIVE_CLOCK_ZONE = (66, 100, 800, 320)     # swept clean before each redraw of the big HH:MM (font 190 at 80,115)
 
 
 def run_live_dashboard(host, usage_minutes, doc_uuid, repush=None):
@@ -2788,8 +2812,15 @@ def cmd_dashboard(args):
             print(f"Saved local preview image to {save_path}")
 
         print("Uploading dashboard to tablet standby screen (/usr/share/remarkable/suspended.png)...")
-        if load_config().get("dash_app", {}).get("feed") and subscription and "windows" in subscription:
-            feed_dash_usage(target_host, subscription)   # the tablet dashboard without a login of its own
+        dash_app = load_config().get("dash_app")
+        if dash_app:   # the tablet dashboard runs by itself; this only tops up its stock of printed pages when the PC is around
+            try:
+                top_up_dash_pages(target_host, (load_config().get("weather_location") or {}).get("name", ""),
+                                  [(t, False) for t in dash_app.get("tasks") or []] or None)
+            except Exception as e:
+                print(f"⚠️  tablet dashboard pages not topped up: {str(e)[:80]}")
+            if dash_app.get("feed") and subscription and "windows" in subscription:
+                feed_dash_usage(target_host, subscription)   # the tablet dashboard without a login of its own
         try:
             # Ensure backup of original
             run_ssh("test -f /usr/share/remarkable/suspended.png.original || cp /usr/share/remarkable/suspended.png /usr/share/remarkable/suspended.png.original", host=target_host)
