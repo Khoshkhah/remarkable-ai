@@ -149,7 +149,11 @@ def test_baked_dashboard_has_every_glyph_zone_and_bar_the_tablet_program_expects
         for size, chars in rm_ai.GLYPH_SETS.items():
             assert all(f"g{size}_{ord(c)}.bin" in names for c in chars), size
         assert all(f"sweep_{z}.bin" in names for z in rm_ai.TABLET_DASH_LAYOUT["zones"])
-        assert {"bar0.bin", "bar1.bin", "bar2.bin", "layout", "glyphs"} <= names
+        assert {"bar0.bin", "bar1.bin", "bar2.bin", "ebar0.bin", "e190_48.bin", "e48_65.bin", "layout", "glyphs"} <= names
+        # the eraser of a glyph runs along the same strokes, three passes each, as eraser strokes
+        erase = events((out / "e190_49.bin").read_bytes())
+        assert sum(1 for t, c, v in erase if t == rm_ai.EV_KEY and c == rm_ai.BTN_TOOL_RUBBER and v == 1) == 3 * len(rm_ai.STROKE_FONT["1"][1])
+        assert len(rm_ai.erase_paths([(0, 0), (100, 0)])) == 3 and rm_ai.erase_paths([(0, 0), (100, 0)])[1][0][1] == 0
         glyphs = {(int(a), int(b)): float(c) for a, b, c in (l.split() for l in (out / "glyphs").read_text().splitlines())}
         assert glyphs[(48, ord(" "))] > 0 and glyphs[(190, ord("0"))] > glyphs[(110, ord("0"))] > glyphs[(48, ord("0"))]
         layout = (out / "layout").read_text()

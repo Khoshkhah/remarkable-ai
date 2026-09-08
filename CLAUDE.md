@@ -150,7 +150,12 @@ origins and bars, written to the tablet as `layout`; rmdash draws only zones who
 Glyphs are single strokes: `STROKE_FONT` is a designed plotter-style font (lines and arcs on a 100-unit
 em, cap height 72, y down; `_arc()` angles are clockwise on screen, 90 = bottom) that `stroke_glyph()`
 centres in the page font's advance width, so a thick pen (the Marker) draws a bold digit in a second;
-`bake_dash_app()` records them at `GLYPH_BASE` with advance widths in `glyphs`. Data:
+`bake_dash_app()` records them at `GLYPH_BASE` with advance widths in `glyphs`, each with an eraser twin
+(`e<size>_<code>`, `ebar<i>`: `erase_paths()`, three eraser passes along the stroke, 6 px apart, run 3 px
+past the ends) that rmdash uses to take a zone's old content out along its own strokes (`draw_zone(...,
+eraser=1)`); zone sweeps (`SWEEP_LANE` 6 px) are only for a page whose content is unknown. Measured: the
+app removes a point of a stroke only when the eraser passes within about (17 − width/2) px of its
+centreline, so 14 px lanes left slivers of 27 px ballpoint strokes between the lanes. Data:
 Open-Meteo directly (also while idle, for the printed block), Claude usage either from a `token` file
 (a Claude Code login made for the tablet in another `CLAUDE_CONFIG_DIR`; the program renews it with
 `refresh_claude_token`'s request, and a login cannot be shared: renewal invalidates the other holder at

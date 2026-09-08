@@ -60,18 +60,19 @@ static double text_width(int size, const char *s) {
     return w;
 }
 
-/* draw `s` in the baked glyphs of `size` with its text origin at (x, y) display px */
-static void draw_text(int size, double x, int y, const char *s) {
+/* draw `s` in the baked glyphs of `size` with its text origin at (x, y) display px; with `eraser` the
+ * glyphs' eraser twins run along the same strokes and take the text out again */
+static void draw_text(int size, double x, int y, const char *s, int eraser) {
     int i; for (i = 0; i < ngl && gl[i].size != size; i++);
     if (i == ngl) { fprintf(stderr, "no glyphs of size %d\n", size); return; }
     char name[32];
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p != ' ') { snprintf(name, sizeof name, "g%d_%d.bin", size, *p); stroke_file(name, 0, (int)lround(x) - base_x, y - base_y, -1); }
+        if (*p != ' ') { snprintf(name, sizeof name, "%c%d_%d.bin", eraser ? 'e' : 'g', size, *p); stroke_file(name, eraser, (int)lround(x) - base_x, y - base_y, -1); }
         x += gl[i].adv[*p];
     }
 }
 
-static void draw_at(const char *tname, const char *s, int dy) { struct text *t = T(tname); if (t) draw_text(t->size, t->x, t->y + dy, s); }
+static void draw_at(const char *tname, const char *s, int dy, int eraser) { struct text *t = T(tname); if (t) draw_text(t->size, t->x, t->y + dy, s, eraser); }
 
 /* ---------- data: HTTPS through openssl, tiny JSON scanning ---------- */
 
@@ -257,11 +258,13 @@ static void want_all(char want[NZ][512], struct tm *lt) {
     }
 }
 
-static void draw_zone(int z, const char *want, struct tm *lt) {
+/* draw a zone's content, or with `eraser` take exactly that content out again (the same strokes, run
+ * with the eraser twins): this is how a zone is cleared before its new content, precise and quick */
+static void draw_zone(int z, const char *want, struct tm *lt, int eraser) {
     char buf[512]; strncpy(buf, want, sizeof buf - 1); buf[511] = 0;
-    if (z == 0) draw_at("clock", buf, 0);
-    else if (z == 1) draw_at("date", buf, 0);
-    else if (z == 2) draw_at("caltitle", buf, 0);
+    if (z == 0) draw_at("clock", buf, 0, eraser);
+    else if (z == 1) draw_at("date", buf, 0, eraser);
+    else if (z == 2) draw_at("caltitle", buf, 0, eraser);
     else if (z == 3) {
         struct text *t = T("cal"); if (!t) return;
         struct tm first = *lt; first.tm_mday = 1; first.tm_hour = 12; time_t ft = mktime(&first); localtime_r(&ft, &first);
@@ -270,30 +273,30 @@ static void draw_zone(int z, const char *want, struct tm *lt) {
         for (int d = 1; d <= ndays; d++) {
             char s[8]; snprintf(s, sizeof s, "%d", d);
             int cx = cal.x0 + col * cal.col, cy = cal.y0 + row * cal.row;
-            draw_text(t->size, cx - text_width(t->size, s) / 2, cy - t->size * 0.55, s);
-            if (d == lt->tm_mday) stroke_file("ring.bin", 0, cx - base_x, cy - base_y, -1);
+            draw_text(t->size, cx - text_width(t->size, s) / 2, cy - t->size * 0.55, s, eraser);
+            if (d == lt->tm_mday) stroke_file(eraser ? "ering.bin" : "ring.bin", eraser, cx - base_x, cy - base_y, -1);
             if (++col == 7) { col = 0; row++; }
         }
     } else if (z >= 4 && z <= 6) {
         int i = z - 4; char *p = strtok(buf, "|"); if (!p) return;
         int pct = atoi(p); char *dow = strtok(NULL, "|"), *hm = strtok(NULL, "|");
-        char name[16], s[8]; snprintf(name, sizeof name, "bar%d.bin", i);
-        if (pct > 0) stroke_file(name, 0, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100);
-        snprintf(s, sizeof s, "%d", pct); snprintf(name, sizeof name, "pct%d", i); draw_at(name, s, 0);
+        char name[20], s[8]; snprintf(name, sizeof name, "%sbar%d.bin", eraser ? "e" : "", i);
+        if (pct > 0) stroke_file(name, eraser, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100 + (eraser ? 8 : 0));
+        snprintf(s, sizeof s, "%d", pct); snprintf(name, sizeof name, "pct%d", i); draw_at(name, s, 0, eraser);
         snprintf(name, sizeof name, "reset%d", i);
         struct text *rt = T(name);
-        if (dow) draw_at(name, dow, 0);
-        if (hm && rt) draw_at(name, hm, (int)(rt->size * 1.15));   /* second line under the first */
+        if (dow) draw_at(name, dow, 0, eraser);
+        if (hm && rt) draw_at(name, hm, (int)(rt->size * 1.15), eraser);   /* second line under the first */
     } else if (z == 7) {
         char *temp = strtok(buf, "|"), *text = strtok(NULL, "|"), *line = strtok(NULL, "|");
-        if (temp) draw_at("temp", temp, 0);
-        if (text) draw_at("wtext", text, 0);
-        if (line) draw_at("wline", line, 0);
+        if (temp) draw_at("temp", temp, 0, eraser);
+        if (text) draw_at("wtext", text, 0, eraser);
+        if (line) draw_at("wline", line, 0, eraser);
         for (int r = 0; r < 5; r++) {
             char *dow = strtok(NULL, "|"), *wt = strtok(NULL, "|"), *tt = strtok(NULL, "|"), *pop = strtok(NULL, "|");
             if (!dow || !wt || !tt) break;
-            draw_at("fcdow", dow, 56 * r); draw_at("fctext", wt, 56 * r); draw_at("fctemp", tt, 56 * r);
-            if (pop && *pop) draw_at("fcpop", pop, 56 * r);
+            draw_at("fcdow", dow, 56 * r, eraser); draw_at("fctext", wt, 56 * r, eraser); draw_at("fctemp", tt, 56 * r, eraser);
+            if (pop && *pop) draw_at("fcpop", pop, 56 * r, eraser);
         }
     }
 }
@@ -470,12 +473,12 @@ int main(int argc, char **argv) {
         want_all(want, &lt);
         int changed[NZ], any = 0; char name[32];
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
-        for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
+        for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { draw_zone(z, shown[z], &lt, 1); if (page_lost) break; }   /* out with the old, along its own strokes */
         if (page_lost) continue;
         if (any) hover(START_SETTLE_US);
         for (int z = 0; z < NZ; z++) if (changed[z]) {
             long long t0 = now_us(); long f0 = frames_written;
-            draw_zone(z, want[z], &lt);
+            draw_zone(z, want[z], &lt, 0);
             if (page_lost) break;
             strcpy(shown[z], want[z]);
             fprintf(stderr, "%s: %s (%.0f s, %ld frames, %.1f ms/frame)\n", ZONES[z], want[z], (now_us() - t0) / 1e6, frames_written - f0,
