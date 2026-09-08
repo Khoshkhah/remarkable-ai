@@ -685,6 +685,8 @@ def cmd_push(args):
             old_content_raw = run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=target_host)
             content = json.loads(old_content_raw)
             content["pageCount"] = page_count
+            if getattr(args, "margins", None) is not None:
+                content["margins"] = args.margins
         except Exception:
             content = {
                 "extraMetadata": {}, "fileType": "pdf", "formatVersion": 2,
@@ -711,7 +713,7 @@ def cmd_push(args):
             "fileType": "pdf",
             "formatVersion": 2,
             "lineHeight": -1,
-            "margins": 125,
+            "margins": getattr(args, "margins", None) if getattr(args, "margins", None) is not None else 125,
             "orientation": "portrait",
             "pageCount": page_count,
             "textScale": 1,
@@ -742,6 +744,7 @@ def cmd_push(args):
     run_ssh("systemctl restart xochitl", host=target_host)
     folder_msg = f" in folder '{folder_name}'" if folder_name else ""
     print(f"✅ Successfully uploaded '{title}' to reMarkable{folder_msg}!")
+    return doc_uuid
 
 
 def analyze_with_ai(image_path, action="summarize", prompt=None):
@@ -1151,6 +1154,7 @@ class SevenSegmentDigit:
 
 class DigitalClock:
     """Real-time 7-segment digital clock rendered directly via Virtual Stylus."""
+    START_SETTLE = 4.0   # seconds of pen hover after the start-up erase before drawing (1 s lost the hour digits on a PDF page)
     EDGE = 130   # corner presets keep this far from the screen edges: xochitl's toolbar column on the
                  # left and the notebook menu at the top-right are ~105px, and a stroke landing on them
                  # opens menus or switches tools instead of drawing
@@ -1246,7 +1250,7 @@ class DigitalClock:
     def _origin(self):
         """Top-left of the first digit and the total width of the clock for the current position."""
         w, h = self.w, self.h
-        is_seconds_only = (self.format == "MM:SS")
+        is_seconds_only = self.format in ("MM:SS", "HH:MM")   # the two 4-digit layouts
         num_digits = 4 if is_seconds_only else 6
         num_colons = 1 if is_seconds_only else 2
         total_w = num_digits * w + (num_digits - num_colons - 1) * self.digit_gap + num_colons * self.colon_gap
@@ -1270,7 +1274,7 @@ class DigitalClock:
         w, h = self.w, self.h
         digit_gap = self.digit_gap
         colon_gap = self.colon_gap
-        is_seconds_only = (self.format == "MM:SS")
+        is_seconds_only = self.format in ("MM:SS", "HH:MM")
         start_x, start_y, total_w = self._origin()
 
         # Frame: rounded rectangle around the whole clock, as far out as it can go without entering the
@@ -1320,28 +1324,39 @@ class DigitalClock:
             add_digit()
             add_digit()
 
+    def start(self):
+        """Connect, erase digits an earlier run left at this spot, then draw the colons and the frame."""
+        self.stylus.connect()
+        print("🧹 Erasing old digits along the segment lines...", flush=True)
+        for d in self.digits:
+            d.clear()
+        # after that long eraser session xochitl stays busy for a while (longer on a PDF page, where it
+        # re-renders the page under every erase) and drops strokes sent meanwhile: hover until it is done
+        self.stylus.hover((self.digits[0].x, self.digits[0].y), self.START_SETTLE)
+        for cx, cy in self.colons:   # filled discs as wide as the bars are thick
+            self.stylus.stroke(self._dot(cx, cy, self.thickness, self.pen_width), pressure=self.pressure)
+        if self.frame:
+            self.stylus.stroke(self._frame_path(0), pressure=self.pressure)
+
+    def show(self, time_str):
+        """Change only the digits that differ: all erasing first, then all drawing (one eraser->pen switch)."""
+        changed = [i for i, (d, ch) in enumerate(zip(self.digits, time_str)) if d.current_char != ch]
+        for i in changed:
+            self.digits[i].erase_for(time_str[i])
+        for i in changed:
+            self.digits[i].draw_for(time_str[i])
+        return changed
+
     def run(self, duration=None, clear_on_exit=False, once=False, interval=1.0, slow=None, step=1):
         step_delay = float(slow if slow is not None else interval)
         is_slow_mode = slow is not None
-        fmt = "%M%S" if self.format == "MM:SS" else "%H%M%S"
+        fmt = {"MM:SS": "%M%S", "HH:MM": "%H%M"}.get(self.format, "%H%M%S")
         def shown_now():   # the real time at the last interval boundary, e.g. :00 :05 :10 for --interval 5
             return datetime.fromtimestamp(math.floor(time.time() / step_delay) * step_delay).strftime(fmt)
 
         print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos} (size: {self.w}x{self.h})", flush=True)
-        self.stylus.connect()
         try:
-            # 1. Erase along the segment lines so digits left by an earlier run at this spot go away
-            print("🧹 Erasing old digits along the segment lines...", flush=True)
-            for d in self.digits:
-                d.clear()
-            # after that long eraser session, hover the pen tip a moment so xochitl switches back to the pen
-            self.stylus.hover((self.digits[0].x, self.digits[0].y), 1.0)
-
-            # 2. Draw the stationary colons once: filled discs as wide as the bars are thick
-            for cx, cy in self.colons:
-                self.stylus.stroke(self._dot(cx, cy, self.thickness, self.pen_width), pressure=self.pressure)
-            if self.frame:
-                self.stylus.stroke(self._frame_path(0), pressure=self.pressure)
+            self.start()
 
             # 3. Determine starting time
             now = datetime.now()
@@ -1353,9 +1368,8 @@ class DigitalClock:
                 time_str = shown_now()
 
             # 4. Draw initial digits
-            for digit, char in zip(self.digits, time_str):
-                digit.transition_to(char)
-            display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
+            self.show(time_str)
+            display_str = f"{time_str[:2]}:{time_str[2:]}" if len(time_str) == 4 else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
             print(f"⏰ Time drawn: [{display_str}] at {self.pos}.", flush=True)
 
             if once:
@@ -1387,14 +1401,10 @@ class DigitalClock:
                 step_count += 1
 
                 if new_time_str != time_str:
-                    display_str = f"{new_time_str[:2]}:{new_time_str[2:]}" if self.format == "MM:SS" else f"{new_time_str[:2]}:{new_time_str[2:4]}:{new_time_str[4:]}"
+                    display_str = f"{new_time_str[:2]}:{new_time_str[2:]}" if len(new_time_str) == 4 else f"{new_time_str[:2]}:{new_time_str[2:4]}:{new_time_str[4:]}"
                     changed_indices = [i for i, (c1, c2) in enumerate(zip(time_str, new_time_str)) if c1 != c2]
 
-                    # all erasing first, then all drawing: one eraser->pen switch per tick
-                    for idx in changed_indices:
-                        self.digits[idx].erase_for(new_time_str[idx])
-                    for idx in changed_indices:
-                        self.digits[idx].draw_for(new_time_str[idx])
+                    self.show(new_time_str)
 
                     time_str = new_time_str
                     print(f"  [{display_str}] Step #{step_count}: updated digit(s) {changed_indices} -> '{time_str}'", flush=True)
@@ -1590,20 +1600,37 @@ def fetch_claude_subscription_usage():
             body = json.load(r)
     except Exception as e:
         return {"error": str(e)[:80]}
-    # the endpoint names the model-specific weekly window by a codename ("nimbus_quill" as of 2026-09);
-    # /usage in Claude Code shows it as the weekly Fable limit
-    labels = {"five_hour": "Session", "seven_day": "Week", "nimbus_quill": "Week Fable", "seven_day_fable": "Week Fable",
-              "seven_day_opus": "Week Opus", "seven_day_sonnet": "Week Sonnet"}
-    windows = [(labels.get(k, k.replace("_", " ").title()[:12]), v.get("utilization"), v.get("resets_at"))
-               for k, v in body.items() if isinstance(v, dict) and v.get("utilization") is not None]
+    # `limits` is the list /usage in Claude Code shows: kind session / weekly_all / weekly_scoped (the
+    # per-model weekly window, whose scope names the model, e.g. "Fable"); the top-level dicts are
+    # the same data under codenames and serve as the fallback
+    windows = []
+    for lim in body.get("limits") or []:
+        kind, pct = lim.get("kind"), lim.get("percent")
+        if pct is None:
+            continue
+        if kind == "session":
+            label = "Session"
+        elif kind == "weekly_all":
+            label = "Week"
+        elif kind == "weekly_scoped":
+            label = "Week " + (((lim.get("scope") or {}).get("model") or {}).get("display_name") or "model")
+        else:
+            label = kind.replace("_", " ").title()[:12]
+        windows.append((label, pct, lim.get("resets_at")))
+    if not windows:
+        labels = {"five_hour": "Session", "seven_day": "Week"}
+        windows = [(labels.get(k, k.replace("_", " ").title()[:12]), v.get("utilization"), v.get("resets_at"))
+                   for k, v in body.items() if isinstance(v, dict) and v.get("utilization") is not None]
     if not windows:
         return {"error": "unexpected response, keys: " + ", ".join(list(body)[:6])}
-    order = {"Session": 0, "Week": 1, "Week Fable": 2, "Week Opus": 3}
-    return {"windows": sorted(windows, key=lambda w: order.get(w[0], 9))[:3],
-            "all_keys": [k for k, v in body.items() if isinstance(v, dict)]}
+    return {"windows": windows[:3], "all_keys": [lim.get("kind") for lim in body.get("limits") or []] or list(body)}
 
 
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None):
+LIVE_USAGE_ROWS = (1000, 1190, 1380)  # y of the three usage rows (label + bar; digits 40px below)
+LIVE_BAR_X = (278, 521)             # x extent of the bar interior the pen fills
+
+
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False):
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
@@ -1630,7 +1657,8 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
         time_str = now.strftime("%I:%M %p").lstrip("0")
     else:
         time_str = now.strftime("%H:%M")
-    draw.text((80, 115), time_str, font=f_clock, fill=0)
+    if not live:   # the live page leaves this blank: the pen draws HH:MM there and updates it
+        draw.text((80, 115), time_str, font=f_clock, fill=0)
 
     f_date = get_font(38, bold=True)
     date_str = now.strftime("%A, %B %d, %Y").upper()
@@ -1687,8 +1715,18 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
         draw.text((80, y_use + 28), f"last 30 days: {u['tokens_in'] / 1e6:.1f}M tokens in  •  {u['tokens_out'] / 1e6:.2f}M out", font=get_font(18), fill=0)
 
     # Claude usage box (session / week / week Fable, like `/usage` in Claude Code); the quote box otherwise
-    draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
-    if subscription and "windows" in subscription:
+    if live:
+        # Live page: printed labels, empty bar outlines and a "%" per row; the pen fills the bars and
+        # draws the percentages as 7-segment digits (UsageWidget), so no reload is ever needed
+        draw.rounded_rectangle([(80, 920), (550, 1560)], radius=12, outline=0, width=3)
+        draw.text((105, 940), "CLAUDE USAGE", font=get_font(22, bold=True), fill=0)
+        draw.line([(105, 975), (525, 975)], fill=200, width=1)
+        for label, y_row in zip(("SESSION", "WEEK", "WEEK FABLE"), LIVE_USAGE_ROWS):
+            draw.text((105, y_row), label, font=get_font(22, bold=True), fill=0)
+            draw.rectangle([(LIVE_BAR_X[0] - 4, y_row), (LIVE_BAR_X[1] + 4, y_row + 26)], outline=0, width=2)
+            draw.text((268, y_row + 128), "%", font=get_font(34, bold=True), fill=0)   # right after the pen-drawn number
+    elif subscription and "windows" in subscription:
+        draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
         draw.text((105, 940), "CLAUDE USAGE", font=get_font(22, bold=True), fill=0)
         draw.line([(105, 975), (525, 975)], fill=200, width=1)
         y_row = 995
@@ -1706,6 +1744,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
                     pass
             y_row += 58
     else:
+        draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
         draw.text((105, 940), "DAILY FOCUS", font=get_font(22, bold=True), fill=0)
         draw.line([(105, 975), (525, 975)], fill=200, width=1)
         if subscription and "error" in subscription:
@@ -1714,23 +1753,24 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
             quote = "Simplicity is the ultimate\nsophistication.\n\nMake each stroke count."
         draw.multiline_text((105, 1000), quote, font=get_font(22, bold=False), fill=0, spacing=8)
 
-    # Daily Habits Tracker
-    draw.rounded_rectangle([(80, 1220), (550, 1680)], radius=12, outline=0, width=3)
-    draw.text((105, 1240), "DAILY HABITS", font=get_font(22, bold=True), fill=0)
-    draw.line([(105, 1275), (525, 1275)], fill=200, width=1)
-    if not habits:
-        habits = [
-            "Deep Work Session (90m)",
-            "Hydration (2.5L)",
-            "Physical Exercise / Walk",
-            "Review & Plan Tomorrow",
-            "reMarkable AI Synchronization"
-        ]
-    y_hab = 1305
-    for h in habits:
-        draw.rounded_rectangle([(105, y_hab), (135, y_hab + 30)], radius=4, outline=0, width=2)
-        draw.text((155, y_hab + 3), h, font=get_font(20, bold=False), fill=0)
-        y_hab += 70
+    # Daily Habits Tracker (the live page's usage box takes this space)
+    if not live:
+        draw.rounded_rectangle([(80, 1220), (550, 1680)], radius=12, outline=0, width=3)
+        draw.text((105, 1240), "DAILY HABITS", font=get_font(22, bold=True), fill=0)
+        draw.line([(105, 1275), (525, 1275)], fill=200, width=1)
+        if not habits:
+            habits = [
+                "Deep Work Session (90m)",
+                "Hydration (2.5L)",
+                "Physical Exercise / Walk",
+                "Review & Plan Tomorrow",
+                "reMarkable AI Synchronization"
+            ]
+        y_hab = 1305
+        for h in habits:
+            draw.rounded_rectangle([(105, y_hab), (135, y_hab + 30)], radius=4, outline=0, width=2)
+            draw.text((155, y_hab + 3), h, font=get_font(20, bold=False), fill=0)
+            y_hab += 70
 
     # 5. Right Column: Priorities & Action Items
     draw.text((630, 425), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
@@ -1779,6 +1819,138 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
     draw.text((1080, 1735), f"Updated: {ts_str}", font=f_foot, fill=0)
 
     return im
+
+def sweep_path(x0, y0, x1, y1, lane=14):
+    """One serpentine eraser path over a rectangle: vertical lanes `lane` px apart (the eraser is ~17 px wide)."""
+    pts = []
+    for i, x in enumerate(range(int(x0), int(x1) + 1, lane)):
+        pts += [(x, y0), (x, y1)] if i % 2 == 0 else [(x, y1), (x, y0)]
+    return pts
+
+
+def text_strokes(text, size, x, y, pitch, bold=True):
+    """Pen strokes that fill `text`, rendered in the dashboard font at (x, y): one horizontal run per
+    dark span on every `pitch`-th pixel row, so the pen reproduces the printed glyph shapes."""
+    from PIL import Image, ImageDraw
+    font = get_font(size, bold=bold)
+    left, top, right, bottom = font.getbbox(text)
+    img = Image.new("L", (right + 2, bottom + 2), 255)
+    ImageDraw.Draw(img).text((0, 0), text, font=font, fill=0)
+    px = img.load()
+    strokes = []
+    for yy in range(top + pitch // 2, bottom, pitch):
+        run = None
+        for xx in range(right + 2):
+            dark = px[xx, yy] < 128
+            if dark and run is None:
+                run = xx
+            elif not dark and run is not None:
+                if xx - run >= 3:
+                    strokes.append([(x + run, y + yy), (x + xx - 1, y + yy)])
+                run = None
+    return strokes
+
+
+def wait_for_open(host, doc_uuid, since, timeout=180):
+    """Wait until the tablet opens the document (its metadata gets a lastOpened after `since`);
+    timeout None waits forever."""
+    while timeout is None or time.time() - since < timeout:
+        try:
+            meta = json.loads(run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.metadata", host=host))
+            if int(meta.get("lastOpened", "0")) / 1000 > since - 5:
+                return True
+        except Exception:
+            pass
+        time.sleep(3)
+    return False
+
+
+LIVE_CLOCK_ZONE = (66, 100, 800, 320)     # swept clean before each redraw of the big HH:MM (font 190 at 80,115)
+
+
+def run_live_dashboard(host, usage_minutes, repush=None):
+    """Keep the open dashboard page current with the pen, in the page's own font: every minute sweep
+    the clock zone clean and write HH:MM again; every `usage_minutes` do the same for usage rows whose
+    value changed (bar + percentage). All erasing first, then one long pause (xochitl drops strokes
+    while still busy erasing, longest on PDF pages), then all drawing."""
+    saved = load_config().get("clock_defaults", {})
+    pressure = max(1, min(4095, saved.get("pressure", 2500)))
+    ink = saved.get("ink_width") or saved.get("pen_width") or 12
+    pitch = max(6, int(ink) // 7)             # row spacing of the fill strokes: the pencil (~70px halo) -> 10px, ballpoint -> 6px
+    stylus = VirtualStylus(host=host)
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    stylus.connect()
+    shown, last_usage, rows, rows_shown = None, 0, [], [None, None, None]
+    shown_date = datetime.now().date()
+
+    def reset_lines(resets_at):
+        """('TUE', '08:00') in local time from the endpoint's ISO timestamp, or () when unknown."""
+        try:
+            local = datetime.fromisoformat(resets_at.replace("Z", "+00:00")).astimezone()
+            return (local.strftime("%a").upper(), local.strftime("%H:%M"))
+        except (AttributeError, ValueError, TypeError):
+            return ()
+    try:
+        while True:
+            if repush and datetime.now().date() != shown_date:
+                # the printed date, calendar and week number are stale: re-render and push the template
+                # (one reload a day), then draw nothing until the document is open on the tablet again
+                print("  📅 New day: pushing a fresh template (the tablet reloads once)...", flush=True)
+                stylus.close()
+                pushed_at = time.time()
+                doc_uuid = repush()
+                shown_date = datetime.now().date()
+                # xochitl restores the open document after its restart without touching lastOpened, so
+                # wait for a fresh lastOpened only briefly, then carry on
+                wait_for_open(host, doc_uuid, pushed_at, timeout=90)
+                stylus.connect()
+                shown = None
+            time_str = datetime.now().strftime("%H:%M")
+            changed_rows = []
+            if time.time() - last_usage >= usage_minutes * 60:
+                sub = fetch_claude_subscription_usage()
+                if sub and "windows" in sub:
+                    rows = [(max(0, min(100, round(float(p)))), reset_lines(r)) for _, p, r in sub["windows"]][:3]
+                    changed_rows = [i for i, row in enumerate(rows) if rows_shown[i] != row]
+                else:
+                    print(f"  ⚠️  usage not updated: {(sub or {}).get('error', 'no Claude Code login')}", flush=True)
+                last_usage = time.time()
+            if time_str != shown or changed_rows:
+                # 1. all erasing: one sweep per zone
+                if time_str != shown:
+                    stylus.stroke(sweep_path(*LIVE_CLOCK_ZONE), is_eraser=True, pressure=4000)
+                for i in changed_rows:
+                    y = LIVE_USAGE_ROWS[i]
+                    stylus.stroke(sweep_path(95, y - 4, 535, y + 185), is_eraser=True, pressure=4000)
+                # 2. let xochitl finish erasing before any pen stroke
+                stylus.hover((LIVE_CLOCK_ZONE[0], LIVE_CLOCK_ZONE[1]), DigitalClock.START_SETTLE)
+                # 3. all drawing, in the page's font
+                if time_str != shown:
+                    for path in text_strokes(time_str, 190, 80, 115, pitch):
+                        stylus.stroke(path, pressure=pressure)
+                    shown = time_str
+                    print(f"  ⏰ {time_str}", flush=True)
+                for i in changed_rows:
+                    y, (pct, reset) = LIVE_USAGE_ROWS[i], rows[i]
+                    if pct > 0:
+                        x0, x1 = LIVE_BAR_X
+                        stylus.stroke([(x0, y + 13), (x0 + (x1 - x0) * pct / 100, y + 13)], pressure=pressure)
+                    for path in text_strokes(str(pct), 110, 105, y + 45, pitch):
+                        stylus.stroke(path, pressure=pressure)
+                    for line, text in enumerate(reset):   # e.g. TUE / 08:00, smaller, right of the "%"
+                        # lighter pressure: the pencil line gets thin enough for 44px letters to stay legible
+                        for path in text_strokes(text, 44, 335, y + 60 + 52 * line, max(4, pitch // 2)):
+                            stylus.stroke(path, pressure=max(800, int(pressure * 0.55)))
+                    rows_shown[i] = rows[i]
+                if changed_rows:
+                    print("  🤖 " + "  •  ".join(f"{l} {float(p):.0f}%" for l, p, _ in sub["windows"]), flush=True)
+            time.sleep(max(1, 60 - time.time() % 60))
+    except KeyboardInterrupt:
+        print("\nLive dashboard stopped.", flush=True)
+    finally:
+        stylus.close()
+
 
 def cmd_dashboard(args):
     target_host = get_active_host(getattr(args, "device", None))
@@ -1896,6 +2068,9 @@ def cmd_dashboard(args):
             print("Tip: Press the tablet power button (or run with --suspend) to see the dashboard immediately.")
 
     elif mode == "doc":
+        live = getattr(args, "live", False)
+        if live:   # re-render as the template: blank clock area, printed usage labels and bar outlines
+            im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format, live=True)
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
             temp_pdf = tmp_pdf.name
         im.save(temp_pdf, "PDF", resolution=226.0)
@@ -1907,19 +2082,37 @@ def cmd_dashboard(args):
         folder = getattr(args, "folder", None)
         title = getattr(args, "title", "Daily Dashboard")
         print(f"Pushing dashboard as a notebook document '{title}' to reMarkable...")
-        push_args = argparse.Namespace(
-            file=temp_pdf,
-            folder=folder,
-            title=title,
-            force_new=False,
-            device=getattr(args, "device", None)
-        )
-        cmd_push(push_args)
+        def push_template():
+            """Render today's template and push it as the dashboard document; returns its uuid."""
+            page = render_dashboard_image(battery_info=get_tablet_battery_info(host=target_host), tasks=tasks,
+                                          quote=quote, time_format=time_format, live=True) if live else im
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+                pdf = f.name
+            page.save(pdf, "PDF", resolution=226.0)
+            uuid_ = cmd_push(argparse.Namespace(file=pdf, folder=folder, title=title, force_new=False, margins=0,
+                                                device=getattr(args, "device", None)))
+            try:
+                os.unlink(pdf)
+            except Exception:
+                pass
+            return uuid_
+
+        if live and getattr(args, "no_push", False):
+            print("Using the dashboard page already on the tablet (no push); make sure it is open.", flush=True)
+            run_live_dashboard(target_host, getattr(args, "usage_interval", 5), repush=push_template)
+            return
         try:
             os.unlink(temp_pdf)
         except Exception:
             pass
+        pushed_at = time.time()
+        doc_uuid = push_template()
         print(f"Daily Dashboard notebook created! Open it on your tablet to write notes with your stylus.")
+        if live and doc_uuid:
+            print(f"📄 Open '{title}' on the tablet now; the clock and usage bars start once it is open (waiting up to 3 min)...", flush=True)
+            if not wait_for_open(target_host, doc_uuid, pushed_at):
+                print("   Could not tell whether it is open; starting anyway.", flush=True)
+            run_live_dashboard(target_host, getattr(args, "usage_interval", 5), repush=push_template)
 
 
 def main():
@@ -1973,7 +2166,7 @@ def main():
     p_clock = subparsers.add_parser("clock", help="Real-time 7-segment digital clock via Virtual Stylus with minimal delta updates")
     p_clock.add_argument("--pos", "-p", type=str, default=None, help="Screen position: top-right (default), top-left, center, bottom-right (presets stay clear of the toolbar and menus), or a raw X,Y")
     p_clock.add_argument("--size", "-s", type=str, default=None, choices=["small", "medium", "large", "xlarge"], help="Clock size preset")
-    p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
+    p_clock.add_argument("--format", choices=["HH:MM:SS", "HH:MM", "MM:SS"], default="HH:MM:SS", help="Clock time format")
     p_clock.add_argument("--thickness", "-t", type=lambda v: v if v == "max" else int(v), default=None, help="Bar thickness in px (default 12) or 'max' for the thickest the size allows; thicker than one pen line is built from overlapping passes (max per size: small 12, medium 25, large 33, xlarge 45)")
     p_clock.add_argument("--pressure", type=int, default=None, help="Simulated pen pressure 0..4095 (default 2500); widens pressure-sensitive pens such as the ballpoint")
     p_clock.add_argument("--pen-width", type=int, default=None, help="Width in px of one line of the selected pen at that pressure; by default measured with a test line at start (0 forces measuring even when a default is saved)")
@@ -2012,6 +2205,9 @@ def main():
     p_dash.add_argument("--folder", "-f", type=str, default=None, help="Folder on tablet for doc mode")
     p_dash.add_argument("--title", "-t", type=str, default="Daily Dashboard", help="Document title for doc mode")
     p_dash.add_argument("--save", type=str, default=None, help="Save local preview PNG image")
+    p_dash.add_argument("--live", action="store_true", help="With --mode doc: push the page once as a template, then keep drawing HH:MM and the Claude usage bars on it with the pen (no reloads)")
+    p_dash.add_argument("--usage-interval", type=float, default=5, help="Minutes between usage refreshes in --live mode (default 5)")
+    p_dash.add_argument("--no-push", action="store_true", help="With --live: don't push the template again, draw on the dashboard page already open on the tablet")
     p_dash.set_defaults(func=cmd_dashboard)
 
     args = parser.parse_args()
