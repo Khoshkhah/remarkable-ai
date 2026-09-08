@@ -695,7 +695,7 @@ int main(int argc, char **argv) {
         if (any) ink_drawn(&ink);
         if (time(NULL) - fetched >= minutes * 60) {        /* network only after drawing; what changed is drawn next round */
             long long t0 = now_us();
-            if (zone_on[7]) fetch_weather();
+            fetch_weather();   /* the printed page and the sleep screen need it whether or not the pen draws it */
             fetch_usage();
             fetched = time(NULL); sleep_due = 1;
             fprintf(stderr, "data fetched in %.1f s\n", (now_us() - t0) / 1e6);
