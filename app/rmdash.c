@@ -365,7 +365,9 @@ static int load_background(const char *day) {
     return o == (size_t)SW * SH;
 }
 
-/* PNG, 8-bit gray, stored (uncompressed) deflate blocks: no zlib on the tablet */
+/* PNG, 8-bit gray, written with a small deflate of our own (no zlib on the tablet): one fixed-Huffman
+ * block, runs of a repeated byte coded as <length, distance 1> matches. A mostly white page shrinks
+ * about 30x, which matters: the tablet's root filesystem has a few MB free. */
 static uint32_t crc_table[256];
 static uint32_t crc32_(uint32_t c, const unsigned char *b, size_t n) {
     if (!crc_table[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t r = i; for (int k = 0; k < 8; k++) r = r & 1 ? 0xEDB88320u ^ (r >> 1) : r >> 1; crc_table[i] = r; }
@@ -378,20 +380,48 @@ static void png_chunk(FILE *f, const char *type, const unsigned char *data, size
     uint32_t c = crc32_(0, (const unsigned char *)type, 4); c = crc32_(c, data, n);
     unsigned char t[4]; be32(t, c); fwrite(t, 1, 4, f);
 }
+static struct { unsigned char *buf; size_t n, cap; uint32_t acc; int nb; } bw;
+static void put_bits(uint32_t v, int n) {   /* LSB first, as deflate wants */
+    bw.acc |= v << bw.nb; bw.nb += n;
+    while (bw.nb >= 8) { if (bw.n < bw.cap) bw.buf[bw.n++] = bw.acc & 255; bw.acc >>= 8; bw.nb -= 8; }
+}
+static void put_huff(uint32_t code, int n) {   /* Huffman codes go MSB first */
+    uint32_t r = 0; for (int i = 0; i < n; i++) r = (r << 1) | ((code >> i) & 1);
+    put_bits(r, n);
+}
+static void put_literal(int b) { if (b < 144) put_huff(0x30 + b, 8); else put_huff(0x190 + b - 144, 9); }
+static void put_run(int len) {   /* a <length, distance 1> match: 3..258 */
+    static const int base[] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+    static const int extra[] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+    int i = 28; while (base[i] > len) i--;
+    int sym = 257 + i;
+    if (sym < 280) put_huff(sym - 256, 7); else put_huff(0xC0 + sym - 280, 8);
+    if (extra[i]) put_bits(len - base[i], extra[i]);
+    put_huff(0, 5);   /* distance code 0 = distance 1 */
+}
+static size_t deflate_runs(const unsigned char *raw, size_t n, unsigned char *out, size_t cap) {
+    bw.buf = out; bw.n = 0; bw.cap = cap; bw.acc = 0; bw.nb = 0;
+    put_bits(1, 1); put_bits(1, 2);   /* final block, fixed Huffman */
+    size_t i = 0;
+    while (i < n) {
+        put_literal(raw[i]);
+        size_t j = i + 1; while (j < n && raw[j] == raw[i] && j - i - 1 < 258) j++;
+        size_t run = j - i - 1;
+        if (run >= 3) { put_run((int)run); i = j; } else i++;
+    }
+    put_huff(0, 7);   /* end of block */
+    if (bw.nb) put_bits(0, 8 - bw.nb);
+    return bw.n;
+}
 static int write_png(const char *path) {
     size_t raw_n = (size_t)SH * (SW + 1);
     unsigned char *raw = malloc(raw_n);
     for (int y = 0; y < SH; y++) { raw[y * (SW + 1)] = 0; memcpy(raw + y * (SW + 1) + 1, simg + y * SW, SW); }
-    size_t blocks = (raw_n + 65534) / 65535, zn = 2 + raw_n + blocks * 5 + 4;
-    unsigned char *z = malloc(zn); size_t p = 0;
-    z[p++] = 0x78; z[p++] = 0x01;
+    size_t zcap = raw_n + raw_n / 4 + 64; unsigned char *z = malloc(zcap);
+    z[0] = 0x78; z[1] = 0x01;
+    size_t p = 2 + deflate_runs(raw, raw_n, z + 2, zcap - 8);
     uint32_t a = 1, b = 0;
     for (size_t i = 0; i < raw_n; i++) { a = (a + raw[i]) % 65521; b = (b + a) % 65521; }
-    for (size_t off = 0; off < raw_n; off += 65535) {
-        size_t n = raw_n - off < 65535 ? raw_n - off : 65535;
-        z[p++] = off + n >= raw_n; z[p++] = n & 255; z[p++] = n >> 8; z[p++] = ~n & 255; z[p++] = (~n >> 8) & 255;
-        memcpy(z + p, raw + off, n); p += n;
-    }
     be32(z + p, (b << 16) | a); p += 4;
     FILE *f = fopen(path, "wb"); if (!f) { free(raw); free(z); return 0; }
     fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
