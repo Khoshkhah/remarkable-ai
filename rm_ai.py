@@ -1437,11 +1437,13 @@ def cmd_clock(args):
     # flag given on the command line > saved default > built-in default
     opts = {k: getattr(args, k) if getattr(args, k) is not None else saved.get(k)
             for k in ("pos", "size", "thickness", "pressure", "pen_width", "ink_width", "frame", "interval")}
-    opts["pos"] = opts["pos"] or "top-right"
-    opts["thickness"] = opts["thickness"] or 12
-    opts["pressure"] = opts["pressure"] or 2500
-    opts["interval"] = opts["interval"] or 1.0
-    if opts["pen_width"] == 0:          # --pen-width 0: measure even if a default width is saved
+    # built-in defaults: the look tuned on an rM2 with the pencil at full pressure (see README)
+    builtin = {"pos": "center", "size": "large", "thickness": 28, "pressure": 4000,
+               "pen_width": 12, "ink_width": 70, "frame": True, "interval": 2.0}
+    for k, v in builtin.items():
+        if opts[k] is None:
+            opts[k] = v
+    if opts["pen_width"] == 0:          # --pen-width 0: measure even if a default width is set
         opts["pen_width"] = None
     if args.save_defaults:
         cfg["clock_defaults"] = {k: v for k, v in opts.items() if v is not None}
@@ -2257,17 +2259,17 @@ def main():
 
     # clock
     p_clock = subparsers.add_parser("clock", help="Real-time 7-segment digital clock via Virtual Stylus with minimal delta updates")
-    p_clock.add_argument("--pos", "-p", type=str, default=None, help="Screen position: top-right (default), top-left, center, bottom-right (presets stay clear of the toolbar and menus), or a raw X,Y")
+    p_clock.add_argument("--pos", "-p", type=str, default=None, help="Screen position: center (default), top-right, top-left, bottom-right (presets stay clear of the toolbar and menus), or a raw X,Y")
     p_clock.add_argument("--size", "-s", type=str, default=None, choices=["small", "medium", "large", "xlarge"], help="Clock size preset")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "HH:MM", "MM:SS"], default="HH:MM:SS", help="Clock time format")
-    p_clock.add_argument("--thickness", "-t", type=lambda v: v if v == "max" else int(v), default=None, help="Bar thickness in px (default 12) or 'max' for the thickest the size allows; thicker than one pen line is built from overlapping passes (max per size: small 12, medium 25, large 33, xlarge 45)")
-    p_clock.add_argument("--pressure", type=int, default=None, help="Simulated pen pressure 0..4095 (default 2500); widens pressure-sensitive pens such as the ballpoint")
-    p_clock.add_argument("--pen-width", type=int, default=None, help="Width in px of one line of the selected pen at that pressure; by default measured with a test line at start (0 forces measuring even when a default is saved)")
-    p_clock.add_argument("--ink-width", type=int, default=None, help="Full width in px that one line really covers, halo included, so erasing removes all of it (pencil at pressure 4000 ≈ 70); defaults to the measured or given pen width")
-    p_clock.add_argument("--frame", action=argparse.BooleanOptionalAction, default=None, help="Draw a rounded frame around the clock (--no-frame overrides a saved default)")
+    p_clock.add_argument("--thickness", "-t", type=lambda v: v if v == "max" else int(v), default=None, help="Bar thickness in px (default 28) or 'max' for the thickest the size allows; thicker than one pen line is built from overlapping passes (max per size: small 12, medium 25, large 33, xlarge 45)")
+    p_clock.add_argument("--pressure", type=int, default=None, help="Simulated pen pressure 0..4095 (default 4000); widens and darkens pressure-sensitive pens such as the pencil and ballpoint")
+    p_clock.add_argument("--pen-width", type=int, default=None, help="Width in px of one line of the selected pen at that pressure (default 12); 0 measures it with a test line at start")
+    p_clock.add_argument("--ink-width", type=int, default=None, help="Full width in px that one line really covers, halo included, so erasing removes all of it (default 70, the pencil at pressure 4000)")
+    p_clock.add_argument("--frame", action=argparse.BooleanOptionalAction, default=None, help="Draw a rounded frame around the clock (default on; --no-frame turns it off)")
     p_clock.add_argument("--save-defaults", action="store_true", help="Store the given --pos/--size/--thickness/--pressure/--pen-width/--ink-width/--frame/--interval as the defaults for future runs, then exit")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
-    p_clock.add_argument("--interval", "-i", type=float, default=None, help="Seconds between updates (default 1); with 5 the clock shows the real time at :00, :05, :10 ... so each reading stays visible longer")
+    p_clock.add_argument("--interval", "-i", type=float, default=None, help="Seconds between updates (default 2); with 5 the clock shows the real time at :00, :05, :10 ... so each reading stays visible longer")
     p_clock.add_argument("--slow", type=float, default=None, help="Slow-motion test delay in seconds: wait N seconds per 1-second increment (e.g. --slow 5)")
     p_clock.add_argument("--step", type=int, default=1, help="Number of seconds to advance per update (default: 1)")
     p_clock.add_argument("--once", "-1", action="store_true", help="Draw current time once and exit immediately")

@@ -167,7 +167,7 @@ rm-ai dashboard --mode doc --live --no-push   # reuse the page already open on t
 export ANTHROPIC_ADMIN_KEY="sk-ant-admin..."   # API spend/tokens line (Console > Settings > Admin keys; needs an organization)
 
 # Live digital clock drawn on the open page with the virtual pen (no reload)
-rm-ai clock                               # your saved defaults (see --save-defaults)
+rm-ai clock                               # built-in defaults: center, large, pencil at pressure 4000, 28px bars, frame, every 2 s
 rm-ai clock --pos center --duration 60 --clear
 rm-ai clock --thickness 28 --frame --interval 2
 rm-ai clock --pressure 4000               # the pencil gets darker and wider with pressure; the ballpoint 12 -> 17 px
@@ -225,7 +225,8 @@ in place with no reload: only the segments that change are erased and redrawn.
 - **Pen**: you pick the pen on the tablet. At start the clock draws one short test line and reads its
   width back from the page file to size its erase sweeps; `--pen-width` / `--ink-width` skip that.
 - **Cadence**: `--interval 2` shows the real time every 2 seconds, `--duration`, `--once`, `--clear`.
-- **Defaults**: add `--save-defaults` to any invocation to make its options the defaults.
+- **Defaults**: built in for the pencil at full pressure (center, large, 28 px bars, frame, every 2 s);
+  add `--save-defaults` to any invocation to make its options your defaults instead.
 
 Things the tablet decides, not the tool: after "Erase all" the eraser stays the active tool and
 every stroke erases, so tap the pen first; the pencil gets both darker and wider with pressure; the
