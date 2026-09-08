@@ -83,10 +83,8 @@ def run_ssh(cmd, host=None):
         raise RuntimeError(f"SSH command failed to '{target}': {res.stderr.strip()}")
     return res.stdout
 
-def install_ssh_key_with_paramiko(ip, password):
-    """Automatically authorize local SSH public key on tablet using Paramiko."""
-    import paramiko
-
+def install_ssh_key(ip, password=None):
+    """Authorize local SSH public key on tablet using Paramiko or OpenSSH fallback."""
     ssh_dir = Path.home() / ".ssh"
     ssh_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,31 +100,70 @@ def install_ssh_key_with_paramiko(ip, password):
         try:
             subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(priv_key)], check=True, capture_output=True)
         except Exception:
-            k = paramiko.Ed25519Key.generate()
-            k.write_private_key_file(str(priv_key))
-            with open(pub_key_path, "w") as f:
-                f.write(f"{k.get_name()} {k.get_base64()} remarkable-ai\n")
+            pass
+
+    if not pub_key_path or not pub_key_path.exists():
+        raise RuntimeError("No SSH key found and could not generate one. Run: ssh-keygen -t ed25519")
 
     pub_key_content = pub_key_path.read_text().strip()
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(ip, username="root", password=password, timeout=8)
+    # Attempt 1: Try Paramiko
+    paramiko = None
+    try:
+        import paramiko as _p
+        paramiko = _p
+    except ImportError:
+        print("  Installing paramiko for automated key exchange...")
+        for pcmd in [
+            [sys.executable, "-m", "pip", "install", "paramiko"],
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", "paramiko"],
+            [sys.executable, "-m", "pip", "install", "--user", "paramiko"],
+        ]:
+            try:
+                subprocess.run(pcmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import paramiko as _p
+                paramiko = _p
+                break
+            except Exception:
+                continue
 
-    cmd = (
+    if paramiko and password:
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(ip, username="root", password=password, timeout=8)
+
+            cmd = (
+                'mkdir -p /home/root/.ssh && chmod 700 /home/root/.ssh && '
+                f'grep -qF "{pub_key_content}" /home/root/.ssh/authorized_keys 2>/dev/null || '
+                f'echo "{pub_key_content}" >> /home/root/.ssh/authorized_keys && '
+                'chmod 600 /home/root/.ssh/authorized_keys'
+            )
+            stdin, stdout, stderr = client.exec_command(cmd)
+            exit_status = stdout.channel.recv_exit_status()
+            client.close()
+
+            if exit_status == 0:
+                return True
+        except Exception as pe:
+            print(f"  Note: Paramiko connection failed ({pe}), trying OpenSSH...")
+
+    # Attempt 2: Fallback to OpenSSH with isolated known_hosts
+    print("  Authorizing key via system OpenSSH (isolated host verification)...")
+    remote_cmd = (
         'mkdir -p /home/root/.ssh && chmod 700 /home/root/.ssh && '
         f'grep -qF "{pub_key_content}" /home/root/.ssh/authorized_keys 2>/dev/null || '
         f'echo "{pub_key_content}" >> /home/root/.ssh/authorized_keys && '
         'chmod 600 /home/root/.ssh/authorized_keys'
     )
-    stdin, stdout, stderr = client.exec_command(cmd)
-    exit_status = stdout.channel.recv_exit_status()
-    client.close()
-
-    if exit_status != 0:
-        err = stderr.read().decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"Failed to install key on tablet: {err}")
+    ssh_cmd = ["ssh"] + get_ssh_base_opts() + [f"root@{ip}", remote_cmd]
+    res = subprocess.run(ssh_cmd)
+    if res.returncode != 0:
+        raise RuntimeError(f"OpenSSH key authorization failed (exit code {res.returncode})")
     return True
+
+install_ssh_key_with_paramiko = install_ssh_key
+
 
 def setup_wizard(target_ip=None, target_password=None, device_name=None, skills_only=False):
     """Universal interactive onboarding wizard for any new machine/user."""

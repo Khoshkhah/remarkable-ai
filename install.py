@@ -50,6 +50,21 @@ def main():
             print("   Please check your pip/python environment.")
             sys.exit(1)
 
+    # Ensure paramiko is installed for automated SSH key setup
+    try:
+        import paramiko
+    except ImportError:
+        for pcmd in [
+            [sys.executable, "-m", "pip", "install", "paramiko"],
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", "paramiko"],
+            [sys.executable, "-m", "pip", "install", "--user", "paramiko"],
+        ]:
+            try:
+                subprocess.run(pcmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                break
+            except Exception:
+                continue
+
     # 2b. Ensure CLI launchers exist for both rm-ai and rm_ai
     local_bin = Path.home() / ".local" / "bin"
     try:
