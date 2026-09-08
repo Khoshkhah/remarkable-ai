@@ -1825,7 +1825,7 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         print(f"📦 Installing {len(list(out.glob('*.bin')))} baked strokes, {DASH_STOCK_DAYS + 1} daily pages and the dashboard program on the tablet...", flush=True)
         # a token the tablet has been renewing itself is newer than any copy on the PC: keep it unless one is
         # given; without a push the printed page is still the one on the tablet, so keep its date too
-        keep = "token printed" + (" state" if no_push and existing else "")   # what is drawn stays valid without a push
+        keep = "token printed"   # never `state`: a reinstall may change how things are drawn, so the page is redone
         run_ssh(f"cd {TABLET_DASH_DIR} 2>/dev/null && for f in {keep}; do cp $f /tmp/rmdash.$f 2>/dev/null; done; "
                 f"rm -rf {TABLET_DASH_DIR}; mkdir -p {TABLET_DASH_DIR}; for f in {keep}; do mv /tmp/rmdash.$f {TABLET_DASH_DIR}/$f 2>/dev/null; done; true", host=host)
         tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
