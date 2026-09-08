@@ -99,9 +99,11 @@ static int https(const char *host, const char *request, char *out, size_t cap) {
     return status;
 }
 
-static const char *jkey(const char *s, const char *key) {   /* after `"key":` (first occurrence from s) */
+static const char *jkey(const char *s, const char *key) {   /* after `"key":` and any blanks (first occurrence from s) */
     char k[64]; snprintf(k, sizeof k, "\"%s\":", key);
-    const char *p = strstr(s, k); return p ? p + strlen(k) : NULL;
+    const char *p = strstr(s, k); if (!p) return NULL;
+    p += strlen(k); while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
 }
 static double jnum(const char *s, const char *key, double dflt) { const char *p = jkey(s, key); return p && (*p == '-' || (*p >= '0' && *p <= '9')) ? atof(p) : dflt; }
 static int jstr(const char *s, const char *key, char *out, size_t cap) {
