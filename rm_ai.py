@@ -735,17 +735,12 @@ class VirtualStylus:
         tool = BTN_TOOL_RUBBER if is_eraser else BTN_TOOL_PEN
         data = bytearray()
 
-        # Tool Proximity switch if needed
-        if self.current_tool != tool:
-            if self.current_tool is not None:
-                data += self.pack_event(EV_KEY, self.current_tool, 0)
-                data += self.pack_event(EV_SYN, SYN_REPORT, 0)
-            data += self.pack_event(EV_KEY, tool, 1)
-            data += self.pack_event(EV_ABS, ABS_DISTANCE, 0)
-            data += self.pack_event(EV_SYN, SYN_REPORT, 0)
-            self.current_tool = tool
+        # 1. Proximity in
+        data += self.pack_event(EV_KEY, tool, 1)
+        data += self.pack_event(EV_ABS, ABS_DISTANCE, 0)
+        data += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
-        # Touch Down at start point
+        # 2. Touch Down at start point
         start_x, start_y = self.display_to_digitizer(*points[0])
         data += self.pack_event(EV_ABS, ABS_X, start_x)
         data += self.pack_event(EV_ABS, ABS_Y, start_y)
@@ -755,9 +750,9 @@ class VirtualStylus:
 
         self.proc.stdin.write(data)
         self.proc.stdin.flush()
-        time.sleep(0.004)
+        time.sleep(0.005)
 
-        # Move through all points with high resolution
+        # 3. Move through all points with high resolution
         for pt in points[1:]:
             dx, dy = self.display_to_digitizer(*pt)
             d = bytearray()
@@ -767,18 +762,22 @@ class VirtualStylus:
             d += self.pack_event(EV_SYN, SYN_REPORT, 0)
             self.proc.stdin.write(d)
             self.proc.stdin.flush()
-            time.sleep(0.002)
+            time.sleep(0.003)
 
-        # Touch Up (keep tool in proximity for next stroke)
+        # 4. Touch Up
         data_up = bytearray()
         data_up += self.pack_event(EV_ABS, ABS_PRESSURE, 0)
         data_up += self.pack_event(EV_KEY, BTN_TOUCH, 0)
-        data_up += self.pack_event(EV_ABS, ABS_DISTANCE, 30)
+        data_up += self.pack_event(EV_ABS, ABS_DISTANCE, 50)
+        data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
+
+        # 5. Proximity out (commits stroke to screen)
+        data_up += self.pack_event(EV_KEY, tool, 0)
         data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
         self.proc.stdin.write(data_up)
         self.proc.stdin.flush()
-        time.sleep(0.004)
+        time.sleep(0.005)
 
 
 DIGIT_SEGMENTS = {
