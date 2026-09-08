@@ -684,6 +684,7 @@ class VirtualStylus:
     def __init__(self, host=None):
         self.host = host or get_active_host()
         self.proc = None
+        self.current_tool = None
 
     def connect(self):
         if self.proc:
@@ -694,11 +695,17 @@ class VirtualStylus:
     def close(self):
         if self.proc:
             try:
+                if self.current_tool is not None:
+                    # Tool proximity out
+                    data = self.pack_event(EV_KEY, self.current_tool, 0) + self.pack_event(EV_SYN, SYN_REPORT, 0)
+                    self.proc.stdin.write(data)
+                    self.proc.stdin.flush()
                 self.proc.stdin.close()
                 self.proc.wait(timeout=2)
             except Exception:
                 pass
             self.proc = None
+            self.current_tool = None
 
     @staticmethod
     def pack_event(ev_type, ev_code, ev_value):
@@ -719,7 +726,7 @@ class VirtualStylus:
         abs_x = max(0, min(20966, abs_x))
         return abs_x, abs_y
 
-    def stroke(self, points, is_eraser=False, pressure=2500):
+    def stroke(self, points, is_eraser=False, pressure=3200):
         if not points:
             return
         if not self.proc:
@@ -728,12 +735,17 @@ class VirtualStylus:
         tool = BTN_TOOL_RUBBER if is_eraser else BTN_TOOL_PEN
         data = bytearray()
 
-        # 1. Tool Proximity In
-        data += self.pack_event(EV_KEY, tool, 1)
-        data += self.pack_event(EV_ABS, ABS_DISTANCE, 0)
-        data += self.pack_event(EV_SYN, SYN_REPORT, 0)
+        # Tool Proximity switch if needed
+        if self.current_tool != tool:
+            if self.current_tool is not None:
+                data += self.pack_event(EV_KEY, self.current_tool, 0)
+                data += self.pack_event(EV_SYN, SYN_REPORT, 0)
+            data += self.pack_event(EV_KEY, tool, 1)
+            data += self.pack_event(EV_ABS, ABS_DISTANCE, 0)
+            data += self.pack_event(EV_SYN, SYN_REPORT, 0)
+            self.current_tool = tool
 
-        # 2. Touch Down at first point
+        # Touch Down at start point
         start_x, start_y = self.display_to_digitizer(*points[0])
         data += self.pack_event(EV_ABS, ABS_X, start_x)
         data += self.pack_event(EV_ABS, ABS_Y, start_y)
@@ -743,9 +755,9 @@ class VirtualStylus:
 
         self.proc.stdin.write(data)
         self.proc.stdin.flush()
-        time.sleep(0.006)
+        time.sleep(0.004)
 
-        # 3. Intermediate move points
+        # Move through all points with high resolution
         for pt in points[1:]:
             dx, dy = self.display_to_digitizer(*pt)
             d = bytearray()
@@ -755,22 +767,18 @@ class VirtualStylus:
             d += self.pack_event(EV_SYN, SYN_REPORT, 0)
             self.proc.stdin.write(d)
             self.proc.stdin.flush()
-            time.sleep(0.003)
+            time.sleep(0.002)
 
-        # 4. Touch Up
+        # Touch Up (keep tool in proximity for next stroke)
         data_up = bytearray()
         data_up += self.pack_event(EV_ABS, ABS_PRESSURE, 0)
         data_up += self.pack_event(EV_KEY, BTN_TOUCH, 0)
-        data_up += self.pack_event(EV_ABS, ABS_DISTANCE, 50)
-        data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
-
-        # 5. Tool Proximity Out
-        data_up += self.pack_event(EV_KEY, tool, 0)
+        data_up += self.pack_event(EV_ABS, ABS_DISTANCE, 30)
         data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
 
         self.proc.stdin.write(data_up)
         self.proc.stdin.flush()
-        time.sleep(0.006)
+        time.sleep(0.004)
 
 
 DIGIT_SEGMENTS = {
@@ -788,8 +796,8 @@ DIGIT_SEGMENTS = {
 }
 
 class SevenSegmentDigit:
-    """Manages state and minimal-delta stroke transitions for a single 7-segment character."""
-    def __init__(self, stylus, top_left_x, top_left_y, width=32, height=56):
+    """Manages state and isolated minimal-delta stroke transitions for a single 7-segment character."""
+    def __init__(self, stylus, top_left_x, top_left_y, width=100, height=180):
         self.stylus = stylus
         self.x = top_left_x
         self.y = top_left_y
@@ -797,83 +805,117 @@ class SevenSegmentDigit:
         self.h = height
         self.mid_y = top_left_y + height // 2
         self.current_segments = set()
-        self.segment_coords = self._compute_segment_coords()
+        self.draw_coords, self.erase_coords = self._compute_segment_coords()
 
     def _compute_segment_coords(self):
         x, y, w, h, m = self.x, self.y, self.w, self.h, self.mid_y
-        gap = 3
+        corner_gap = max(10, int(w * 0.14))
+        erase_margin = max(24, int(w * 0.28))
 
-        def line(x1, y1, x2, y2, steps=4):
+        def make_line(x1, y1, x2, y2, step_dist=5):
+            dist = max(abs(x2 - x1), abs(y2 - y1))
+            steps = max(10, int(dist / step_dist))
             return [(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)]
 
-        return {
-            'A': line(x + gap, y, x + w - gap, y),
-            'B': line(x + w, y + gap, x + w, m - gap),
-            'C': line(x + w, m + gap, x + w, y + h - gap),
-            'D': line(x + gap, y + h, x + w - gap, y + h),
-            'E': line(x, m + gap, x, y + h - gap),
-            'F': line(x, y + gap, x, m - gap),
-            'G': line(x + gap, m, x + w - gap, m),
+        # 1. Complete visible drawing paths (with clean beveled corner gaps)
+        draw = {
+            'A': make_line(x + corner_gap, y, x + w - corner_gap, y),
+            'B': make_line(x + w, y + corner_gap, x + w, m - corner_gap + 2),
+            'C': make_line(x + w, m + corner_gap - 2, x + w, y + h - corner_gap),
+            'D': make_line(x + corner_gap, y + h, x + w - corner_gap, y + h),
+            'E': make_line(x, m + corner_gap - 2, x, y + h - corner_gap),
+            'F': make_line(x, y + corner_gap, x, m - corner_gap + 2),
+            'G': make_line(x + corner_gap, m, x + w - corner_gap, m),
         }
+
+        # 2. Isolated eraser paths (confined to inner 50% core so eraser radius never touches adjacent segments)
+        erase = {
+            'A': make_line(x + erase_margin, y, x + w - erase_margin, y),
+            'B': make_line(x + w, y + erase_margin, x + w, m - erase_margin),
+            'C': make_line(x + w, m + erase_margin, x + w, y + h - erase_margin),
+            'D': make_line(x + erase_margin, y + h, x + w - erase_margin, y + h),
+            'E': make_line(x, m + erase_margin, x, y + h - erase_margin),
+            'F': make_line(x, y + erase_margin, x, m - erase_margin),
+            'G': make_line(x + erase_margin, m, x + w - erase_margin, m),
+        }
+
+        return draw, erase
 
     def transition_to(self, char):
         target = DIGIT_SEGMENTS.get(char, set())
         to_turn_off = self.current_segments - target
         to_turn_on = target - self.current_segments
 
-        # 1. Erase segments that turned off
+        # 1. Erase segments that turned off (using isolated inner core)
         for seg in to_turn_off:
-            coords = self.segment_coords[seg]
-            self.stylus.stroke(coords, is_eraser=True, pressure=2500)
+            coords = self.erase_coords[seg]
+            self.stylus.stroke(coords, is_eraser=True, pressure=3200)
 
         # 2. Draw segments that turned on
         for seg in to_turn_on:
-            coords = self.segment_coords[seg]
-            self.stylus.stroke(coords, is_eraser=False, pressure=2500)
+            coords = self.draw_coords[seg]
+            self.stylus.stroke(coords, is_eraser=False, pressure=3200)
 
         self.current_segments = target
         return len(to_turn_off) + len(to_turn_on)
 
+    def redraw_current(self):
+        """Redraw all active segments to ensure full crispness."""
+        for seg in self.current_segments:
+            coords = self.draw_coords[seg]
+            self.stylus.stroke(coords, is_eraser=False, pressure=3200)
+
     def clear(self):
         for seg in self.current_segments:
-            coords = self.segment_coords[seg]
-            self.stylus.stroke(coords, is_eraser=True, pressure=2500)
+            coords = self.erase_coords[seg]
+            self.stylus.stroke(coords, is_eraser=True, pressure=3200)
         self.current_segments = set()
 
 
 class DigitalClock:
     """Real-time 7-segment digital clock rendered directly via Virtual Stylus."""
-    def __init__(self, host=None, pos="top-right", format="HH:MM:SS"):
+    def __init__(self, host=None, pos="center", format="HH:MM:SS", size="large"):
         self.stylus = VirtualStylus(host=host)
         self.pos = pos
         self.format = format
+        self.size = size
         self.digits = []
         self.colon_coords = []
         self._init_layout()
 
     def _init_layout(self):
-        w, h = 32, 56
-        digit_gap = 10
-        colon_gap = 20
+        # Resolve dimensions based on size preset
+        sizes = {
+            "small": (36, 64, 10, 20),
+            "medium": (65, 120, 16, 28),
+            "large": (100, 180, 24, 40),
+            "huge": (140, 250, 32, 54),
+        }
+        w, h, digit_gap, colon_gap = sizes.get(self.size, sizes["large"])
 
         is_seconds_only = (self.format == "MM:SS")
         num_digits = 4 if is_seconds_only else 6
         num_colons = 1 if is_seconds_only else 2
         total_w = num_digits * w + (num_digits - num_colons - 1) * digit_gap + num_colons * colon_gap
 
-        if self.pos == "top-right":
-            start_x, start_y = 1404 - total_w - 60, 60
+        if self.pos == "center":
+            start_x = (1404 - total_w) // 2
+            start_y = (1872 - h) // 2
+        elif self.pos == "top-right":
+            start_x = 1404 - total_w - 60
+            start_y = 70
         elif self.pos == "top-left":
-            start_x, start_y = 60, 60
-        elif self.pos == "center":
-            start_x, start_y = (1404 - total_w) // 2, 900
+            start_x = 70
+            start_y = 70
         elif self.pos == "bottom-right":
-            start_x, start_y = 1404 - total_w - 60, 1750
+            start_x = 1404 - total_w - 60
+            start_y = 1872 - h - 70
         elif "," in self.pos:
             parts = self.pos.split(",")
             start_x, start_y = int(parts[0].strip()), int(parts[1].strip())
         else:
-            start_x, start_y = 1404 - total_w - 60, 60
+            start_x = (1404 - total_w) // 2
+            start_y = (1872 - h) // 2
 
         curr_x = start_x
         self.digits = []
@@ -888,9 +930,17 @@ class DigitalClock:
             nonlocal curr_x
             curr_x -= digit_gap
             mid_x = curr_x + colon_gap // 2
-            dot1 = [(mid_x, start_y + h // 3), (mid_x + 1, start_y + h // 3)]
-            dot2 = [(mid_x, start_y + 2 * h // 3), (mid_x + 1, start_y + 2 * h // 3)]
-            self.colon_coords.extend([dot1, dot2])
+            dot_size = max(4, int(w * 0.08))
+            y1 = start_y + int(h * 0.35)
+            y2 = start_y + int(h * 0.65)
+            # Solid box dot for high visibility
+            box1 = [(mid_x - dot_size, y1 - dot_size), (mid_x + dot_size, y1 - dot_size),
+                    (mid_x + dot_size, y1 + dot_size), (mid_x - dot_size, y1 + dot_size),
+                    (mid_x - dot_size, y1 - dot_size)]
+            box2 = [(mid_x - dot_size, y2 - dot_size), (mid_x + dot_size, y2 - dot_size),
+                    (mid_x + dot_size, y2 + dot_size), (mid_x - dot_size, y2 + dot_size),
+                    (mid_x - dot_size, y2 - dot_size)]
+            self.colon_coords.extend([box1, box2])
             curr_x += colon_gap
 
         if is_seconds_only:
@@ -958,7 +1008,7 @@ class DigitalClock:
 
 def cmd_clock(args):
     host = get_active_host(args.device)
-    clock = DigitalClock(host=host, pos=args.pos, format=args.format)
+    clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size)
     clock.run(duration=args.duration, clear_on_exit=args.clear)
 
 
@@ -1038,6 +1088,7 @@ def main():
     p_clock = subparsers.add_parser("clock", help="Real-time 7-segment digital clock via Virtual Stylus with minimal delta updates")
     p_clock.add_argument("--pos", "-p", type=str, default="top-right", help="Screen position: top-right, top-left, center, bottom-right, or X,Y")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
+    p_clock.add_argument("--size", "-s", choices=["small", "medium", "large", "huge"], default="large", help="Digit size preset (default: large)")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
     p_clock.add_argument("--clear", action="store_true", help="Erase the clock from screen on exit")
     p_clock.set_defaults(func=cmd_clock)
