@@ -910,10 +910,10 @@ class DigitalClock:
             add_digit()
 
     def run(self, duration=None, clear_on_exit=False):
-        print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos}")
-        print(f"⚡ Minimum delta state machine active (only changed segments toggled per second).")
-        print(f"💡 Make sure a notebook page is open on your tablet screen.")
-        print(f"   Press Ctrl+C to stop.\n")
+        print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos}", flush=True)
+        print(f"⚡ Minimum delta state machine active (only changed segments toggled per second).", flush=True)
+        print(f"💡 Make sure a notebook page is open on your tablet screen.", flush=True)
+        print(f"   Press Ctrl+C to stop.\n", flush=True)
         self.stylus.connect()
         try:
             # Draw stationary colons once
@@ -932,10 +932,10 @@ class DigitalClock:
                         changes = digit.transition_to(char)
                         total_changes += changes
                     display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
-                    print(f"  [{display_str}] Segments updated: {total_changes}")
+                    print(f"  [{display_str}] Segments updated: {total_changes}", flush=True)
 
                 if duration and (time.time() - start_time) >= duration:
-                    print(f"\n⏱️ Duration of {duration}s reached.")
+                    print(f"\n⏱️ Duration of {duration}s reached.", flush=True)
                     break
 
                 now_t = time.time()
@@ -944,16 +944,16 @@ class DigitalClock:
                     sleep_t += 1.0
                 time.sleep(sleep_t)
         except KeyboardInterrupt:
-            print("\nClock stopped by user.")
+            print("\nClock stopped by user.", flush=True)
         finally:
             if clear_on_exit:
-                print("🧹 Erasing clock strokes...")
+                print("🧹 Erasing clock strokes...", flush=True)
                 for d in self.digits:
                     d.clear()
                 for dots in self.colon_coords:
                     self.stylus.stroke(dots, is_eraser=True, pressure=2500)
             self.stylus.close()
-            print("Virtual stylus disconnected.")
+            print("Virtual stylus disconnected.", flush=True)
 
 
 def cmd_clock(args):
