@@ -1765,8 +1765,8 @@ def stroke_glyph(ch, size, advance):
 
 ERASE_OFFSETS = (-10, -5, 0, 5, 10)   # eraser passes along a stroke, sideways offsets in px: the pen overshoots the
                                       # path by a few px at the outside of curves, the eraser cuts the corner
-ERASE_STEP_PX = 8                     # the eraser moves twice as fast as the pen: no ink to lay down, and the medium
-                                      # eraser (~17 px) still overlaps itself at that step
+ERASE_STEP_PX = 8                     # the eraser moves twice as fast as the pen: no ink to lay down. Not faster: the app
+                                      # erases at each sampled position, and 16 px steps left pieces of wide strokes between samples
 SWEEP_LANE = 6                        # lanes of a zone sweep: the eraser only takes a point of a wide stroke when it
                                       # passes within a few px of the stroke's centreline (measured with a 27 px ballpoint)
 
