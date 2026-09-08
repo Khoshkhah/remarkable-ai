@@ -27,8 +27,8 @@ def test_stroke_is_resampled_hovered_and_lifted():
     assert evs[-2] == (rm_ai.EV_KEY, rm_ai.BTN_TOOL_PEN, 0)
 
 
-def test_erasing_a_segment_never_touches_its_neighbours():
-    PEN_R, ERASER_R = 6, 8.5  # ballpoint 2 at ~2500 pressure and eraser size 2, measured on an rM2
+def test_erasing_a_segment_covers_it_and_never_touches_its_neighbours():
+    ERASER_R = rm_ai.SevenSegmentDigit.ERASER_R
 
     def footprint(path, r):  # bounding box of the path swept by a disc of radius r
         xs = [p[0] for p in path]; ys = [p[1] for p in path]
@@ -37,18 +37,36 @@ def test_erasing_a_segment_never_touches_its_neighbours():
     def disjoint(a, b):
         return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
 
+    built = 0
     for w, h in [(50, 90), (75, 140), (95, 175), (120, 220)]:
-        d = rm_ai.SevenSegmentDigit(None, 100, 100, w, h)
-        for seg, erase in d.erase_coords.items():
-            e = footprint(erase, ERASER_R)
-            own = footprint(d.draw_coords[seg], PEN_R)
-            assert e[0] <= own[0] and e[1] <= own[1] and e[2] >= own[2] and e[3] >= own[3], (w, h, seg)
-            for other, draw in d.draw_coords.items():
-                if other != seg:
-                    assert disjoint(e, footprint(draw, PEN_R)), (w, h, seg, other)
+        for pen_width in (6, 12, 18, 24, 32):
+            try:
+                d = rm_ai.SevenSegmentDigit(None, 100, 100, w, h, pen_width=pen_width)
+            except ValueError:
+                continue
+            built += 1
+            pen_r = pen_width / 2
+            for seg, erase in d.erase_coords.items():
+                e = footprint(erase, ERASER_R)
+                own = footprint(d.draw_coords[seg], pen_r)
+                assert e[0] <= own[0] and e[1] <= own[1] and e[2] >= own[2] and e[3] >= own[3], (w, h, pen_width, seg)
+                # the eraser passes must overlap each other, or a strip of ink survives between them
+                across = sorted({p[1] if seg in "ADG" else p[0] for p in erase})
+                assert all(b - a <= 2 * ERASER_R for a, b in zip(across, across[1:])), (w, h, pen_width, seg)
+                for other, draw in d.draw_coords.items():
+                    if other != seg:
+                        assert disjoint(e, footprint(draw, pen_r)), (w, h, pen_width, seg, other)
+    assert built >= 12
+    d = rm_ai.SevenSegmentDigit(None, 0, 0, 95, 175, pen_width=12)   # the geometry verified on a tablet
+    assert d.gap == 18 and len(d.erase_coords["A"]) == 4
+    try:
+        rm_ai.SevenSegmentDigit(None, 0, 0, 75, 140, pen_width=40)
+        assert False, "a 40px pen cannot fit a medium digit"
+    except ValueError:
+        pass
 
 
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
-    test_erasing_a_segment_never_touches_its_neighbours()
+    test_erasing_a_segment_covers_it_and_never_touches_its_neighbours()
     print("ok")

@@ -984,54 +984,59 @@ DIGIT_SEGMENTS = {
 }
 
 class SevenSegmentDigit:
-    """One 7-segment digit; on each change only the segments that differ are erased or redrawn."""
-    GAP = 18            # inset of every bar from the digit corners
-    ERASE_OFFSET = 3    # the eraser makes two passes this far either side of the bar centreline
-    ERASE_EXTEND = 3    # and runs this far past both ends, so no sliver of the pen's round cap survives
-    # ponytail: GAP assumes a ~12px pen and ~17px eraser; raise it if erasing one segment nicks its neighbour
+    """One 7-segment digit; on each change only the segments that differ are erased or redrawn.
 
-    def __init__(self, stylus, top_left_x, top_left_y, width=95, height=175):
+    Geometry follows the width of the pen selected on the tablet: the erase sweep must cover the
+    pen line with margin, and every bar is inset from the corners far enough that erasing it can
+    never touch a neighbouring bar's ink. The eraser is assumed to be xochitl's medium one.
+    """
+    ERASER_R = 8.5      # radius of the medium eraser, measured on an rM2
+    ERASE_EXTEND = 3    # erase paths run this far past both ends so no sliver of the pen's round cap survives
+    MARGIN = 5.5        # erase coverage beyond the pen edge, absorbs stroke placement error
+    # ponytail: a larger eraser size on the tablet needs a bigger ERASER_R here
+
+    def __init__(self, stylus, top_left_x, top_left_y, width=95, height=175, pen_width=12):
         self.stylus = stylus
         self.x, self.y, self.w, self.h = top_left_x, top_left_y, width, height
         self.mid_y = top_left_y + height // 2
         self.current_char = None
-        self.draw_coords = self._segments(0, 0)
-        self.erase_coords = self._segments(self.ERASE_OFFSET, self.ERASE_EXTEND)
-        self.box_eraser_coords = self._box_lanes()
+        pen_r = pen_width / 2
+        spread = max(0.0, pen_r + self.MARGIN - self.ERASER_R)     # outermost erase pass offset
+        n = 2 + int(2 * spread / self.ERASER_R)                     # enough passes that they overlap
+        offsets = [-spread + 2 * spread * i / (n - 1) for i in range(n)]
+        ext = max(self.ERASE_EXTEND, spread)                        # erase overrun past the bar ends
+        self.gap = math.ceil(pen_r + self.ERASER_R + ext)
+        if min(width, height // 2) - 2 * self.gap < 8:
+            raise ValueError(f"a {pen_width}px pen needs {self.gap}px corner gaps, too much for a "
+                             f"{width}x{height} digit; use a bigger --size or a thinner pen")
+        self.draw_coords = self._segments([0], 0)
+        self.erase_coords = self._segments(offsets, ext)
 
     @staticmethod
-    def _bar(p0, p1, off, ext):
-        """Path along p0->p1 extended by ext at both ends; with off > 0 it goes out on one side of the
-        line and back on the other, off px away."""
+    def _bar(p0, p1, offsets, ext):
+        """Serpentine along p0->p1 (extended by ext at both ends), one pass per perpendicular offset."""
         (x0, y0), (x1, y1) = p0, p1
         length = math.hypot(x1 - x0, y1 - y0)
         ux, uy = (x1 - x0) / length, (y1 - y0) / length
-        x0, y0, x1, y1 = x0 - ux * ext, y0 - uy * ext, x1 + ux * ext, y1 + uy * ext
-        if not off:
-            return [(x0, y0), (x1, y1)]
-        nx, ny = -uy * off, ux * off
-        return [(x0 + nx, y0 + ny), (x1 + nx, y1 + ny), (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)]
-
-    def _segments(self, off, ext):
-        x, y, w, h, m, g = self.x, self.y, self.w, self.h, self.mid_y, self.GAP
-        return {
-            'A': self._bar((x + g, y), (x + w - g, y), off, ext),
-            'B': self._bar((x + w, y + g), (x + w, m - g), off, ext),
-            'C': self._bar((x + w, m + g), (x + w, y + h - g), off, ext),
-            'D': self._bar((x + g, y + h), (x + w - g, y + h), off, ext),
-            'E': self._bar((x, m + g), (x, y + h - g), off, ext),
-            'F': self._bar((x, y + g), (x, m - g), off, ext),
-            'G': self._bar((x + g, m), (x + w - g, m), off, ext),
-        }
-
-    def _box_lanes(self):
-        """Serpentine eraser path over the whole digit box plus a margin (lanes 14px apart for a ~17px eraser)."""
-        x0, x1 = self.x - 12, self.x + self.w + 12
-        y0, y1 = self.y - 12, self.y + self.h + 12
+        a = (x0 - ux * ext, y0 - uy * ext)
+        b = (x1 + ux * ext, y1 + uy * ext)
         pts = []
-        for i, lx in enumerate(range(x0, x1 + 1, 14)):
-            pts += [(lx, y0), (lx, y1)] if i % 2 == 0 else [(lx, y1), (lx, y0)]
+        for i, off in enumerate(offsets):
+            ends = [(a[0] - uy * off, a[1] + ux * off), (b[0] - uy * off, b[1] + ux * off)]
+            pts += ends if i % 2 == 0 else ends[::-1]
         return pts
+
+    def _segments(self, offsets, ext):
+        x, y, w, h, m, g = self.x, self.y, self.w, self.h, self.mid_y, self.gap
+        return {
+            'A': self._bar((x + g, y), (x + w - g, y), offsets, ext),
+            'B': self._bar((x + w, y + g), (x + w, m - g), offsets, ext),
+            'C': self._bar((x + w, m + g), (x + w, y + h - g), offsets, ext),
+            'D': self._bar((x + g, y + h), (x + w - g, y + h), offsets, ext),
+            'E': self._bar((x, m + g), (x, y + h - g), offsets, ext),
+            'F': self._bar((x, y + g), (x, m - g), offsets, ext),
+            'G': self._bar((x + g, m), (x + w - g, m), offsets, ext),
+        }
 
     def transition_to(self, char):
         if self.current_char == char:
@@ -1051,16 +1056,19 @@ class SevenSegmentDigit:
         return len(to_erase) + len(to_draw)
 
     def clear(self):
-        if self.current_char is not None:
-            for seg in DIGIT_SEGMENTS.get(self.current_char, set()):
-                self.stylus.stroke(self.erase_coords[seg], is_eraser=True, pressure=4000)
-            self.stylus.stroke(self.box_eraser_coords, is_eraser=True, pressure=4000)
-            self.current_char = None
+        """Erase along all seven segment lines and nothing else: removes this digit, or one left at the
+        same spot by an earlier run, without touching the rest of the page."""
+        for seg in "ABCDEFG":
+            self.stylus.stroke(self.erase_coords[seg], is_eraser=True, pressure=4000)
+        self.current_char = None
 
 
 
 class DigitalClock:
     """Real-time 7-segment digital clock rendered directly via Virtual Stylus."""
+    EDGE = 130   # corner presets keep this far from the screen edges: xochitl's toolbar column on the
+                 # left and the notebook menu at the top-right are ~105px, and a stroke landing on them
+                 # opens menus or switches tools instead of drawing
     SIZE_PRESETS = {
         "small":  {"w": 50,  "h": 90,  "digit_gap": 24, "colon_gap": 48},
         "medium": {"w": 75,  "h": 140, "digit_gap": 36, "colon_gap": 68},
@@ -1068,10 +1076,11 @@ class DigitalClock:
         "xlarge": {"w": 120, "h": 220, "digit_gap": 56, "colon_gap": 100},
     }
 
-    def __init__(self, host=None, pos="top-right", format="HH:MM:SS", size=None):
+    def __init__(self, host=None, pos="top-right", format="HH:MM:SS", size=None, pen_width=12):
         self.stylus = VirtualStylus(host=host)
         self.pos = pos
         self.format = format
+        self.pen_width = pen_width
 
         # Auto size: center defaults to large, corner defaults to medium
         if not size:
@@ -1083,8 +1092,12 @@ class DigitalClock:
         self.colon_gap = cfg["colon_gap"]
 
         self.digits = []
-        self.colon_coords = []
+        self.colons = []          # (cx, cy) of each colon dot
         self._init_layout()
+
+    @staticmethod
+    def _square(cx, cy, r):
+        return [(cx - r, cy - r), (cx + r, cy - r), (cx + r, cy + r), (cx - r, cy + r), (cx - r, cy - r)]
 
     def _init_layout(self):
         w, h = self.w, self.h
@@ -1096,14 +1109,15 @@ class DigitalClock:
         num_colons = 1 if is_seconds_only else 2
         total_w = num_digits * w + (num_digits - num_colons - 1) * digit_gap + num_colons * colon_gap
 
+        e = self.EDGE
         if self.pos == "top-right":
-            start_x, start_y = 1404 - total_w - 60, 60
+            start_x, start_y = 1404 - total_w - e, e
         elif self.pos == "top-left":
-            start_x, start_y = 60, 60
+            start_x, start_y = e, e
         elif self.pos == "center":
             start_x, start_y = (1404 - total_w) // 2, (1872 - h) // 2
         elif self.pos == "bottom-right":
-            start_x, start_y = 1404 - total_w - 60, 1872 - h - 80
+            start_x, start_y = 1404 - total_w - e, 1872 - h - e
         elif "," in self.pos:
             parts = self.pos.split(",")
             start_x, start_y = int(parts[0].strip()), int(parts[1].strip())
@@ -1112,25 +1126,18 @@ class DigitalClock:
 
         curr_x = start_x
         self.digits = []
-        self.colon_coords = []
+        self.colons = []
 
         def add_digit():
             nonlocal curr_x
-            self.digits.append(SevenSegmentDigit(self.stylus, curr_x, start_y, w, h))
+            self.digits.append(SevenSegmentDigit(self.stylus, curr_x, start_y, w, h, self.pen_width))
             curr_x += w + digit_gap
 
         def add_colon():
             nonlocal curr_x
             curr_x -= digit_gap
             mid_x = curr_x + colon_gap // 2
-            y1 = start_y + int(h * 0.33)
-            y2 = start_y + int(h * 0.67)
-            # Small filled squares (a ~12px pen fills a 10px outline)
-            def solid_dot(cx, cy, r=5):
-                return [(cx - r, cy - r), (cx + r, cy - r), (cx + r, cy + r), (cx - r, cy + r), (cx - r, cy - r)]
-            dot1 = solid_dot(mid_x, y1, r=5)
-            dot2 = solid_dot(mid_x, y2, r=5)
-            self.colon_coords.extend([dot1, dot2])
+            self.colons += [(mid_x, start_y + int(h * 0.33)), (mid_x, start_y + int(h * 0.67))]
             curr_x += colon_gap
 
         if is_seconds_only:
@@ -1156,14 +1163,14 @@ class DigitalClock:
         print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos} (size: {self.w}x{self.h})", flush=True)
         self.stylus.connect()
         try:
-            # 1. Clean previous strokes in the clock zone so old numbers don't overlap
-            print("🧹 Preparing clean screen area...", flush=True)
+            # 1. Erase along the segment lines so digits left by an earlier run at this spot go away
+            print("🧹 Erasing old digits along the segment lines...", flush=True)
             for d in self.digits:
-                self.stylus.stroke(d.box_eraser_coords, is_eraser=True, pressure=4000)
+                d.clear()
 
-            # 2. Draw the stationary colons once
-            for dots in self.colon_coords:
-                self.stylus.stroke(dots, is_eraser=False)
+            # 2. Draw the stationary colons once: the pen fills a 10px square outline into a dot
+            for cx, cy in self.colons:
+                self.stylus.stroke(self._square(cx, cy, 5), is_eraser=False)
 
             # 3. Determine starting time
             now = datetime.now()
@@ -1226,15 +1233,19 @@ class DigitalClock:
                 print("🧹 Erasing clock strokes...", flush=True)
                 for d in self.digits:
                     d.clear()
-                for dots in self.colon_coords:
-                    self.stylus.stroke(dots, is_eraser=True, pressure=4000)
+                for cx, cy in self.colons:
+                    self.stylus.stroke(self._square(cx, cy, 5 + self.pen_width // 2), is_eraser=True, pressure=4000)
             self.stylus.close()
             print("Virtual stylus disconnected.", flush=True)
 
 
 def cmd_clock(args):
     host = get_active_host(args.device)
-    clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size)
+    try:
+        clock = DigitalClock(host=host, pos=args.pos, format=args.format, size=args.size, pen_width=args.pen_width)
+    except ValueError as e:
+        print(f"❌ {e}")
+        return
     clock.run(duration=args.duration, clear_on_exit=args.clear, once=args.once, interval=args.interval, slow=args.slow, step=args.step)
 
 
@@ -1632,9 +1643,10 @@ def main():
 
     # clock
     p_clock = subparsers.add_parser("clock", help="Real-time 7-segment digital clock via Virtual Stylus with minimal delta updates")
-    p_clock.add_argument("--pos", "-p", type=str, default="top-right", help="Screen position: top-right, top-left, center, bottom-right, or X,Y")
+    p_clock.add_argument("--pos", "-p", type=str, default="top-right", help="Screen position: top-right, top-left, center, bottom-right (presets stay clear of the toolbar and menus), or a raw X,Y")
     p_clock.add_argument("--size", "-s", type=str, default=None, choices=["small", "medium", "large", "xlarge"], help="Clock size preset")
     p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
+    p_clock.add_argument("--pen-width", type=int, default=12, help="Width in px of the pen selected on the tablet (ballpoint/fineliner size 2 ≈ 12, marker ≈ 24); sizes the erase sweep and segment gaps. Max per size: small 12, medium 25, large 33, xlarge 45")
     p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
     p_clock.add_argument("--interval", "-i", type=float, default=1.0, help="Update interval in seconds (e.g. 5 for slow test)")
     p_clock.add_argument("--slow", type=float, default=None, help="Slow-motion test delay in seconds: wait N seconds per 1-second increment (e.g. --slow 5)")
