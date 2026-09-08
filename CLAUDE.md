@@ -116,6 +116,9 @@ tick loop sleeps to the next wall-clock second, so drawing time cannot drift or 
 image locally and scp's it to `/usr/share/remarkable/suspended.png`, backing the factory image up
 to `suspended.png.original` once (that backup is what `--restore` reads). `--mode doc` instead
 routes through the same PDF upload path as `push`; `--mode live` hands off to `DigitalClock`.
+`fetch_claude_usage()` adds Claude API spend and tokens under the calendar when `ANTHROPIC_ADMIN_KEY`
+is set: raw `urllib` calls to the Admin API cost and usage reports (they are not in the SDK), reduced
+by the pure `summarize_claude_usage()` that `test_rm_ai.py` checks against the documented shapes.
 
 ## Agent configuration lives in three places and is copied outward
 

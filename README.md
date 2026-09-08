@@ -162,6 +162,9 @@ rm-ai dashboard --suspend
 # Push interactive dashboard notebook for physical note-taking
 rm-ai dashboard --mode doc --title "Daily Dashboard"
 
+# Show Claude API spend and tokens on the dashboard: export an Admin API key first
+export ANTHROPIC_ADMIN_KEY="sk-ant-admin..."   # Console > Settings > Admin keys (needs an organization)
+
 # Live 7-segment digital clock via Virtual Stylus (zero reload / zero restart)
 rm-ai clock --pos top-right
 rm-ai clock --pos center --duration 60 --clear

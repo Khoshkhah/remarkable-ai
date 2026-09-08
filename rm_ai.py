@@ -1525,7 +1525,82 @@ def get_font(size, bold=False):
     except Exception:
         return ImageFont.load_default()
 
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h"):
+def summarize_claude_usage(cost_report, usage_report, today):
+    """Reduce the Admin API cost and usage reports (daily buckets) to the numbers the dashboard shows.
+    Amounts are decimal strings in cents; `today` is a UTC date."""
+    month_cents = today_cents = 0.0
+    for bucket in cost_report.get("data", []):
+        day = bucket["starting_at"][:10]
+        cents = sum(float(r["amount"]) for r in bucket.get("results", []))
+        if day[:7] == today.strftime("%Y-%m"):
+            month_cents += cents
+        if day == today.isoformat():
+            today_cents += cents
+    tokens_in = tokens_out = 0
+    for bucket in usage_report.get("data", []):
+        for r in bucket.get("results", []):
+            cc = r.get("cache_creation") or {}
+            tokens_in += r.get("uncached_input_tokens", 0) + r.get("cache_read_input_tokens", 0) + sum(cc.values())
+            tokens_out += r.get("output_tokens", 0)
+    return {"month_usd": month_cents / 100, "today_usd": today_cents / 100, "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+
+def fetch_claude_usage(days=30):
+    """Month-to-date and today's spend plus 30-day token totals from the Anthropic Usage & Cost Admin API.
+    Needs ANTHROPIC_ADMIN_KEY (an Admin API key, sk-ant-admin...; the Admin API needs an organization,
+    not an individual account). Returns None without a key, or {"error": ...} on failure."""
+    import urllib.request
+    import urllib.parse
+    key = os.getenv("ANTHROPIC_ADMIN_KEY")
+    if not key:
+        return None
+    end = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    start = end - timedelta(days=days)
+    params = {"starting_at": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "ending_at": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "bucket_width": "1d", "limit": 31}
+    headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
+               "User-Agent": "remarkable-ai/0.1 (https://github.com/Khoshkhah/remarkable-ai)"}
+    try:
+        reports = []
+        for path in ("cost_report", "usage_report/messages"):
+            url = f"https://api.anthropic.com/v1/organizations/{path}?{urllib.parse.urlencode(params)}"
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20) as r:
+                reports.append(json.load(r))
+        return summarize_claude_usage(reports[0], reports[1], datetime.utcnow().date())
+    except Exception as e:
+        return {"error": str(e)[:80]}
+
+
+def fetch_claude_subscription_usage():
+    """The three windows `/usage` shows in Claude Code — session (5 h), week, week for Fable/Opus — as
+    utilization percentages of the claude.ai subscription Claude Code is logged in with, read from the
+    OAuth usage endpoint with the token Claude Code keeps in ~/.claude/.credentials.json.
+    Returns {"windows": [(label, percent, resets_at_iso)]}, {"error": ...}, or None when not logged in."""
+    import urllib.request
+    path = os.path.expanduser("~/.claude/.credentials.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            token = json.load(f)["claudeAiOauth"]["accessToken"]
+        req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+            "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01", "User-Agent": "remarkable-ai/0.1 (https://github.com/Khoshkhah/remarkable-ai)"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            body = json.load(r)
+    except Exception as e:
+        return {"error": str(e)[:80]}
+    labels = {"five_hour": "Session", "seven_day": "Week", "seven_day_fable": "Week Fable",
+              "seven_day_opus": "Week Opus", "seven_day_sonnet": "Week Sonnet"}
+    windows = [(labels.get(k, k.replace("_", " ").title()), v.get("utilization"), v.get("resets_at"))
+               for k, v in body.items() if isinstance(v, dict) and v.get("utilization") is not None]
+    if not windows:
+        return {"error": "unexpected response, keys: " + ", ".join(list(body)[:6])}
+    order = {"Session": 0, "Week": 1, "Week Fable": 2, "Week Opus": 3}
+    return {"windows": sorted(windows, key=lambda w: order.get(w[0], 9))[:3]}
+
+
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None):
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
@@ -1596,13 +1671,45 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
                     draw.text((tx, ty), str(day), font=f_cal_day, fill=0)
         y_cal += 55
 
-    # Daily Focus / Quote Box
+    # Claude API usage, just under the calendar (fits the 6-row months too)
+    y_use = y_cal + 8
+    draw.text((80, y_use), "CLAUDE API", font=get_font(20, bold=True), fill=0)
+    if claude_usage is None:
+        draw.text((250, y_use), "set ANTHROPIC_ADMIN_KEY to show usage", font=get_font(18), fill=110)
+    elif "error" in claude_usage:
+        draw.text((250, y_use), f"unavailable: {claude_usage['error'][:34]}", font=get_font(18), fill=110)
+    else:
+        u = claude_usage
+        draw.text((250, y_use), f"{now.strftime('%b').upper()} ${u['month_usd']:.2f}  •  TODAY ${u['today_usd']:.2f}", font=get_font(20, bold=True), fill=0)
+        draw.text((80, y_use + 28), f"last 30 days: {u['tokens_in'] / 1e6:.1f}M tokens in  •  {u['tokens_out'] / 1e6:.2f}M out", font=get_font(18), fill=0)
+
+    # Claude usage box (session / week / week Fable, like `/usage` in Claude Code); the quote box otherwise
     draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
-    draw.text((105, 940), "DAILY FOCUS", font=get_font(22, bold=True), fill=0)
-    draw.line([(105, 975), (525, 975)], fill=200, width=1)
-    if not quote:
-        quote = "Simplicity is the ultimate\nsophistication.\n\nMake each stroke count."
-    draw.multiline_text((105, 1000), quote, font=get_font(22, bold=False), fill=0, spacing=8)
+    if subscription and "windows" in subscription:
+        draw.text((105, 940), "CLAUDE USAGE", font=get_font(22, bold=True), fill=0)
+        draw.line([(105, 975), (525, 975)], fill=200, width=1)
+        y_row = 995
+        for label, pct, resets in subscription["windows"]:
+            pct = max(0.0, min(100.0, float(pct)))
+            draw.text((105, y_row), label.upper(), font=get_font(18, bold=True), fill=0)
+            draw.rectangle([(250, y_row + 2), (470, y_row + 20)], outline=0, width=2)
+            draw.rectangle([(252, y_row + 4), (252 + int(216 * pct / 100), y_row + 18)], fill=0)
+            draw.text((480, y_row), f"{pct:.0f}%", font=get_font(18, bold=True), fill=0)
+            if resets:
+                try:
+                    local = datetime.fromisoformat(resets.replace("Z", "+00:00")).astimezone()
+                    draw.text((250, y_row + 26), "resets " + local.strftime("%a %H:%M"), font=get_font(15), fill=110)
+                except ValueError:
+                    pass
+            y_row += 58
+    else:
+        draw.text((105, 940), "DAILY FOCUS", font=get_font(22, bold=True), fill=0)
+        draw.line([(105, 975), (525, 975)], fill=200, width=1)
+        if subscription and "error" in subscription:
+            quote = "Claude usage unavailable:\n" + subscription["error"][:60]
+        elif not quote:
+            quote = "Simplicity is the ultimate\nsophistication.\n\nMake each stroke count."
+        draw.multiline_text((105, 1000), quote, font=get_font(22, bold=False), fill=0, spacing=8)
 
     # Daily Habits Tracker
     draw.rounded_rectangle([(80, 1220), (550, 1680)], radius=12, outline=0, width=3)
@@ -1730,8 +1837,25 @@ def cmd_dashboard(args):
     quote = getattr(args, "quote", None)
     time_format = getattr(args, "format", "24h")
 
+    claude_usage = fetch_claude_usage()
+    if claude_usage is None:
+        print("💡 Set ANTHROPIC_ADMIN_KEY (an Admin API key) to show Claude API spend and tokens on the dashboard.")
+    elif "error" in claude_usage:
+        print(f"⚠️  Claude API usage unavailable: {claude_usage['error']}")
+    else:
+        print(f"🤖 Claude API: ${claude_usage['month_usd']:.2f} this month, ${claude_usage['today_usd']:.2f} today")
+
+    subscription = fetch_claude_subscription_usage()
+    if subscription is None:
+        print("💡 No Claude Code login found (~/.claude/.credentials.json); the usage box shows the daily focus instead.")
+    elif "error" in subscription:
+        print(f"⚠️  Claude usage unavailable: {subscription['error']}")
+    else:
+        print("🤖 Claude usage: " + "  •  ".join(f"{l} {float(p):.0f}%" for l, p, _ in subscription["windows"]))
+
     # Render image
-    im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format)
+    im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format,
+                                claude_usage=claude_usage, subscription=subscription)
 
     save_path = getattr(args, "save", None)
 

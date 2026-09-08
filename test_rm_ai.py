@@ -76,7 +76,25 @@ def test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours():
         pass
 
 
+def test_claude_usage_summary_from_the_documented_report_shapes():
+    import datetime
+    cost = {"data": [
+        {"starting_at": "2026-09-01T00:00:00Z", "results": [{"amount": "123.78912", "currency": "USD"}, {"amount": "76.21088", "currency": "USD"}]},
+        {"starting_at": "2026-09-07T00:00:00Z", "results": [{"amount": "50", "currency": "USD"}]},
+        {"starting_at": "2026-08-31T00:00:00Z", "results": [{"amount": "999", "currency": "USD"}]},   # last month: excluded
+        {"starting_at": "2026-09-05T00:00:00Z", "results": []},                                        # empty day
+    ]}
+    usage = {"data": [{"starting_at": "2026-09-07T00:00:00Z", "results": [
+        {"cache_creation": {"ephemeral_1h_input_tokens": 1000, "ephemeral_5m_input_tokens": 500},
+         "cache_read_input_tokens": 200, "output_tokens": 500, "uncached_input_tokens": 1500}]}]}
+    u = rm_ai.summarize_claude_usage(cost, usage, datetime.date(2026, 9, 7))
+    assert abs(u["month_usd"] - 2.50) < 1e-9 and abs(u["today_usd"] - 0.50) < 1e-9
+    assert u["tokens_in"] == 3200 and u["tokens_out"] == 500
+    assert rm_ai.fetch_claude_usage() is None or "ANTHROPIC_ADMIN_KEY" in __import__("os").environ
+
+
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
     test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours()
+    test_claude_usage_summary_from_the_documented_report_shapes()
     print("ok")
