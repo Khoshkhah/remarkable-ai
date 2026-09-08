@@ -93,8 +93,20 @@ def test_claude_usage_summary_from_the_documented_report_shapes():
     assert rm_ai.fetch_claude_usage() is None or "ANTHROPIC_ADMIN_KEY" in __import__("os").environ
 
 
+def test_weather_summary_from_the_open_meteo_shape():
+    data = {"current": {"temperature_2m": 13.6, "apparent_temperature": 11.2, "weather_code": 2, "wind_speed_10m": 4.4},
+            "daily": {"time": ["2026-09-08", "2026-09-09"], "weather_code": [2, 61],
+                      "temperature_2m_max": [18.1, 15.0], "temperature_2m_min": [9.4, 8.0],
+                      "precipitation_probability_max": [10, 70],
+                      "sunrise": ["2026-09-08T06:12", "2026-09-09T06:14"], "sunset": ["2026-09-08T19:35", "2026-09-09T19:32"]}}
+    w = rm_ai.summarize_weather(data, "Stockholm")
+    assert w["name"] == "Stockholm" and w["text"] == "Partly cloudy" and w["wind"] == 4.4
+    assert w["days"][1] == {"dow": "WED", "text": "Light rain", "max": 15.0, "min": 8.0, "pop": 70, "sunrise": "06:14", "sunset": "19:32"}
+
+
 if __name__ == "__main__":
     test_stroke_is_resampled_hovered_and_lifted()
     test_bars_reach_the_wanted_thickness_and_erasing_never_touches_neighbours()
     test_claude_usage_summary_from_the_documented_report_shapes()
+    test_weather_summary_from_the_open_meteo_shape()
     print("ok")

@@ -1630,7 +1630,58 @@ LIVE_USAGE_ROWS = (1000, 1190, 1380)  # y of the three usage rows (label + bar; 
 LIVE_BAR_X = (278, 521)             # x extent of the bar interior the pen fills
 
 
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False):
+WEATHER_TEXT = {0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast", 45: "Fog", 48: "Rime fog",
+                51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle", 56: "Freezing drizzle", 57: "Freezing drizzle",
+                61: "Light rain", 63: "Rain", 65: "Heavy rain", 66: "Freezing rain", 67: "Freezing rain",
+                71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains", 80: "Showers", 81: "Showers",
+                82: "Heavy showers", 85: "Snow showers", 86: "Snow showers", 95: "Thunderstorm",
+                96: "Thunderstorm, hail", 99: "Thunderstorm, hail"}   # WMO weather codes as Open-Meteo reports them
+
+
+def summarize_weather(data, name):
+    """Reduce an Open-Meteo forecast response to what the dashboard shows."""
+    cur, day = data["current"], data["daily"]
+    days = [{"dow": datetime.fromisoformat(date).strftime("%a").upper(),
+             "text": WEATHER_TEXT.get(day["weather_code"][i], "?"),
+             "max": day["temperature_2m_max"][i], "min": day["temperature_2m_min"][i],
+             "pop": (day.get("precipitation_probability_max") or [None] * 9)[i],
+             "sunrise": day["sunrise"][i][11:16], "sunset": day["sunset"][i][11:16]}
+            for i, date in enumerate(day["time"])]
+    return {"name": name, "temp": cur["temperature_2m"], "feels": cur["apparent_temperature"],
+            "text": WEATHER_TEXT.get(cur["weather_code"], "?"), "wind": cur["wind_speed_10m"], "days": days}
+
+
+def fetch_weather(city):
+    """Current weather and a 5-day forecast for `city` from Open-Meteo (free, no key). The city is
+    geocoded once and the coordinates kept in the config. Returns None without a city, {"error": ..}
+    on failure."""
+    import urllib.request
+    import urllib.parse
+    if not city:
+        return None
+    cfg = load_config()
+    loc = cfg.get("weather_location") or {}
+    try:
+        if loc.get("city", "").lower() != city.lower():
+            url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": city, "count": 1, "language": "en"})
+            with urllib.request.urlopen(url, timeout=15) as r:
+                hits = json.load(r).get("results") or []
+            if not hits:
+                return {"error": f"city not found: {city}"}
+            loc = {"city": city, "name": hits[0]["name"], "lat": hits[0]["latitude"], "lon": hits[0]["longitude"]}
+            cfg["weather_location"] = loc
+            save_config(cfg)
+        params = {"latitude": loc["lat"], "longitude": loc["lon"],
+                  "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
+                  "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
+                  "timezone": "auto", "forecast_days": 6, "wind_speed_unit": "ms"}
+        with urllib.request.urlopen("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params), timeout=15) as r:
+            return summarize_weather(json.load(r), loc["name"])
+    except Exception as e:
+        return {"error": str(e)[:80]}
+
+
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None):
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
@@ -1772,9 +1823,35 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
             draw.text((155, y_hab + 3), h, font=get_font(20, bold=False), fill=0)
             y_hab += 70
 
-    # 5. Right Column: Priorities & Action Items
-    draw.text((630, 425), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
-    draw.line([(630, 465), (1324, 465)], fill=0, width=2)
+    # 5. Right Column: weather (when a city is set), then priorities, then ruled notes (only without weather)
+    y_task = 490
+    if weather and "days" in weather:
+        today, coming = weather["days"][0], weather["days"][1:6]
+        draw.text((630, 425), f"WEATHER  •  {weather['name'].upper()}", font=f_sec, fill=0)
+        draw.line([(630, 465), (1324, 465)], fill=0, width=2)
+        draw.text((630, 478), f"{round(weather['temp'])}°", font=get_font(96, bold=True), fill=0)
+        draw.text((840, 495), weather["text"], font=get_font(32, bold=True), fill=0)
+        pop = f"  •  rain {today['pop']}%" if today.get("pop") is not None else ""
+        draw.text((840, 545), f"feels {round(weather['feels'])}°  •  wind {weather['wind']:.0f} m/s{pop}", font=get_font(22), fill=0)
+        draw.text((630, 605), f"TODAY  H {round(today['max'])}°  L {round(today['min'])}°   •   sunrise {today['sunrise']}   sunset {today['sunset']}",
+                  font=get_font(22, bold=True), fill=0)
+        y_row = 655
+        for d in coming:
+            draw.text((630, y_row), d["dow"], font=get_font(22, bold=True), fill=0)
+            draw.text((720, y_row), d["text"], font=get_font(22), fill=0)
+            draw.text((1010, y_row), f"{round(d['max'])}° / {round(d['min'])}°", font=get_font(22), fill=0)
+            if d.get("pop") is not None:
+                draw.text((1210, y_row), f"{d['pop']}%", font=get_font(22), fill=0)
+            draw.line([(630, y_row + 34), (1324, y_row + 34)], fill=220, width=1)
+            y_row += 42
+        draw.text((630, y_row + 20), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
+        draw.line([(630, y_row + 60), (1324, y_row + 60)], fill=0, width=2)
+        y_task = y_row + 85
+    else:
+        if weather and "error" in weather:
+            draw.text((630, 400), f"weather unavailable: {weather['error'][:50]}", font=get_font(18), fill=110)
+        draw.text((630, 425), "PRIORITIES & ACTION ITEMS", font=f_sec, fill=0)
+        draw.line([(630, 465), (1324, 465)], fill=0, width=2)
 
     if not tasks:
         tasks = [
@@ -1784,7 +1861,6 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
             ("Plan tomorrow's key deliverables", False),
         ]
 
-    y_task = 490
     max_tasks = min(len(tasks), 6)
     for i in range(max_tasks):
         item = tasks[i]
@@ -1801,15 +1877,16 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
         draw.line([(630, y_task + 55), (1324, y_task + 55)], fill=220, width=1)
         y_task += 75
 
-    # Handwriting & Quick Notes ruled section
-    y_notes = y_task + 35
-    draw.text((630, y_notes), "HANDWRITING & QUICK NOTES", font=get_font(24, bold=True), fill=0)
-    draw.line([(630, y_notes + 35), (1324, y_notes + 35)], fill=0, width=2)
+    if not (weather and "days" in weather):
+        # Handwriting & Quick Notes ruled section
+        y_notes = y_task + 35
+        draw.text((630, y_notes), "HANDWRITING & QUICK NOTES", font=get_font(24, bold=True), fill=0)
+        draw.line([(630, y_notes + 35), (1324, y_notes + 35)], fill=0, width=2)
 
-    y_line = y_notes + 90
-    while y_line <= 1680:
-        draw.line([(630, y_line), (1324, y_line)], fill=200, width=1)
-        y_line += 65
+        y_line = y_notes + 90
+        while y_line <= 1680:
+            draw.line([(630, y_line), (1324, y_line)], fill=200, width=1)
+            y_line += 65
 
     # 6. Bottom Footer
     draw.line([(80, 1720), (1324, 1720)], fill=0, width=2)
@@ -2012,6 +2089,19 @@ def cmd_dashboard(args):
     quote = getattr(args, "quote", None)
     time_format = getattr(args, "format", "24h")
 
+    cfg = load_config()
+    if getattr(args, "city", None):
+        cfg["weather_city"] = args.city
+        save_config(cfg)
+    city = cfg.get("weather_city")
+    weather = fetch_weather(city)
+    if weather is None:
+        print("💡 Pass --city once (e.g. --city Stockholm) to add the weather report; it is remembered.")
+    elif "error" in weather:
+        print(f"⚠️  Weather unavailable: {weather['error']}")
+    else:
+        print(f"🌤  {weather['name']}: {round(weather['temp'])}° {weather['text']}, today {round(weather['days'][0]['max'])}°/{round(weather['days'][0]['min'])}°")
+
     claude_usage = fetch_claude_usage()
     if claude_usage is None:
         print("💡 Set ANTHROPIC_ADMIN_KEY (an Admin API key) to show Claude API spend and tokens on the dashboard.")
@@ -2031,7 +2121,7 @@ def cmd_dashboard(args):
 
     # Render image
     im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format,
-                                claude_usage=claude_usage, subscription=subscription)
+                                claude_usage=claude_usage, subscription=subscription, weather=weather)
 
     save_path = getattr(args, "save", None)
 
@@ -2070,7 +2160,7 @@ def cmd_dashboard(args):
     elif mode == "doc":
         live = getattr(args, "live", False)
         if live:   # re-render as the template: blank clock area, printed usage labels and bar outlines
-            im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format, live=True)
+            im = render_dashboard_image(battery_info=battery_info, tasks=tasks, quote=quote, time_format=time_format, live=True, weather=weather)
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
             temp_pdf = tmp_pdf.name
         im.save(temp_pdf, "PDF", resolution=226.0)
@@ -2085,7 +2175,7 @@ def cmd_dashboard(args):
         def push_template():
             """Render today's template and push it as the dashboard document; returns its uuid."""
             page = render_dashboard_image(battery_info=get_tablet_battery_info(host=target_host), tasks=tasks,
-                                          quote=quote, time_format=time_format, live=True) if live else im
+                                          quote=quote, time_format=time_format, live=True, weather=fetch_weather(city)) if live else im
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
                 pdf = f.name
             page.save(pdf, "PDF", resolution=226.0)
@@ -2205,6 +2295,7 @@ def main():
     p_dash.add_argument("--folder", "-f", type=str, default=None, help="Folder on tablet for doc mode")
     p_dash.add_argument("--title", "-t", type=str, default="Daily Dashboard", help="Document title for doc mode")
     p_dash.add_argument("--save", type=str, default=None, help="Save local preview PNG image")
+    p_dash.add_argument("--city", type=str, default=None, help="City for the weather report (Open-Meteo, no key); remembered in the config")
     p_dash.add_argument("--live", action="store_true", help="With --mode doc: push the page once as a template, then keep drawing HH:MM and the Claude usage bars on it with the pen (no reloads)")
     p_dash.add_argument("--usage-interval", type=float, default=5, help="Minutes between usage refreshes in --live mode (default 5)")
     p_dash.add_argument("--no-push", action="store_true", help="With --live: don't push the template again, draw on the dashboard page already open on the tablet")
