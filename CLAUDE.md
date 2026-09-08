@@ -91,6 +91,15 @@ xochitl smooths and predicts pen motion over *time* and debounces tool changes, 
 resamples the path to `STEP_PX` and sends one evdev frame per `FRAME_DT`, with a short hover before
 touch-down and a `TOOL_SETTLE` pause on every pen↔eraser switch. Blasting a stroke in one write
 stretches it ~15% and makes eraser strokes come out as pen lines — that was the original clock bug.
+Speed is part of the look: the pencil lays down less ink the faster it moves, and xochitl's motion
+prediction overruns turns and stroke ends more at speed (~4 px at 4 px/3 ms, ~11/20 px at 12 px/3 ms),
+so `STEP_PX` stays at 4 and is not a free knob.
+Every eraser stroke is followed by `ERASE_SETTLE` (0.15 s): erasing thick ink keeps xochitl busy and
+a stroke sent meanwhile is dropped whole (measured: with no pause every second erase was lost).
+Pens differ wildly from their nominal width — the pencil at pressure 4000 covers ~70px, halo
+included — so `--ink-width` sizes the erase sweep separately from the `--pen-width` the bars are
+built from; `--thickness` stacks passes on top of that. The only reliable way to know what landed
+on the page is to read the `.rm` back after xochitl's autosave (irregular, 10–60 s).
 
 `DigitalClock` sits on top: each digit is 7 segments, and every tick only toggles segments whose
 state changed — pen to draw, eraser to remove — which is what keeps e-ink churn near zero.

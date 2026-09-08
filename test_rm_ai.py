@@ -20,7 +20,9 @@ def test_stroke_is_resampled_hovered_and_lifted():
     st.stroke([(100, 100), (500, 100)], is_eraser=False, pressure=2500)
     evs = events(st.proc.stdin.getvalue())
     xs = [v for t, c, v in evs if t == rm_ai.EV_ABS and c == rm_ai.ABS_Y]  # ABS_Y is the horizontal axis
-    assert len(xs) == 101 and xs == sorted(xs)                              # 400px / STEP_PX + start point
+    import math
+    expected = math.ceil(400 / rm_ai.VirtualStylus.STEP_PX) + 1   # resampled to STEP_PX plus the start point
+    assert len(xs) == expected and xs == sorted(xs)
     assert max(b - a for a, b in zip(xs, xs[1:])) <= rm_ai.VirtualStylus.STEP_PX * 15725 / 1404 + 1
     assert evs.count((rm_ai.EV_SYN, rm_ai.SYN_REPORT, 0)) == len(xs) + 9   # one frame per point + 9 for hover/touch/hold/lift
     assert evs.index((rm_ai.EV_KEY, rm_ai.BTN_TOUCH, 1)) > evs.index((rm_ai.EV_ABS, rm_ai.ABS_DISTANCE, 10))
