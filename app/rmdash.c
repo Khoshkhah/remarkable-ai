@@ -240,8 +240,10 @@ static void want_all(char want[NZ][512], struct tm *lt) {
     for (int i = 0; i < 3; i++) {
         char k[8], pct[16], reset[32]; snprintf(k, sizeof k, "pct%d", i);
         if (!read_kv("usage", k, pct, sizeof pct)) { want[4 + i][0] = 0; continue; }
-        (void)reset;
-        snprintf(want[4 + i], 512, "%d", atoi(pct));
+        snprintf(k, sizeof k, "reset%d", i); read_kv("usage", k, reset, sizeof reset);
+        time_t r = atol(reset); struct tm rt; localtime_r(&r, &rt);
+        char dow[8], hm[8]; strftime(dow, sizeof dow, "%a", &rt); upper(dow); strftime(hm, sizeof hm, "%H:%M", &rt);
+        snprintf(want[4 + i], 512, "%d|%s|%s", atoi(pct), r ? dow : "", r ? hm : "");
     }
     for (int z = 0; z < NZ; z++) if (!zone_on[z]) want[z][0] = 0;
     if (!wx.ok || !zone_on[7]) { want[7][0] = 0; return; }
@@ -277,10 +279,14 @@ static void draw_zone(int z, const char *want, struct tm *lt, int eraser) {
         }
     } else if (z >= 4 && z <= 6) {
         int i = z - 4; char *p = strtok(buf, "|"); if (!p) return;
-        int pct = atoi(p);
+        int pct = atoi(p); char *dow = strtok(NULL, "|"), *hm = strtok(NULL, "|");
         char name[20], s[8]; snprintf(name, sizeof name, "%sbar%d.bin", eraser ? "e" : "", i);
         if (pct > 0) stroke_file(name, eraser, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100 + (eraser ? 8 : 0));
         snprintf(s, sizeof s, "%d", pct); snprintf(name, sizeof name, "pct%d", i); draw_at(name, s, 0, eraser);
+        snprintf(name, sizeof name, "reset%d", i);
+        struct text *rt = T(name);
+        if (dow) draw_at(name, dow, 0, eraser);
+        if (hm && rt) draw_at(name, hm, (int)(rt->size * 1.15), eraser);   /* second line under the first */
     } else if (z == 7) {
         char *temp = strtok(buf, "|"), *text = strtok(NULL, "|"), *line = strtok(NULL, "|");
         if (temp) draw_at("temp", temp, 0, eraser);
@@ -344,28 +350,6 @@ static void weather_block(void) {
         pdf_line(630, y + 34, 1324, y + 34, 1, 220);
     }
 }
-/* the usage rows' reset times as in rm_ai.RESET_TEXT; also the string that tells when they changed */
-static void reset_texts(char *joined, size_t cap) {
-    joined[0] = 0;
-    for (int i = 0; i < 3; i++) {
-        char k[8], v[32], when[16] = ""; snprintf(k, sizeof k, "reset%d", i);
-        if (read_kv("usage", k, v, sizeof v) && atol(v)) { time_t r = atol(v); struct tm rt; localtime_r(&r, &rt); strftime(when, sizeof when, "%a %H:%M", &rt); upper(when); }
-        for (char *c = when; *c; c++) if (*c == ' ') *c = '_';   /* one token in the `printed` file */
-        size_t n = strlen(joined); snprintf(joined + n, cap - n, "%s%s", i ? "|" : "", when);
-    }
-}
-static void usage_block(void) {
-    char joined[64]; reset_texts(joined, sizeof joined);
-    char *p = joined;
-    for (int i = 0; i < 3 && p; i++) {
-        char *bar = strchr(p, '|'); if (bar) *bar = 0;
-        int y = bars[i].y - 13;
-        for (char *c = p; *c; c++) if (*c == '_') *c = ' ';
-        if (*p) { pdf_text(0, 22, 335, y + 60, 110, "resets"); pdf_text(1, 26, 335, y + 88, 60, p); }
-        p = bar ? bar + 1 : NULL;
-    }
-}
-
 /* a one-page PDF: the JPEG template full-page plus the weather block; returns 1 on success */
 static int compose_page(const char *jpg, const char *out) {
     FILE *f = fopen(jpg, "rb"); if (!f) return 0;
@@ -375,7 +359,6 @@ static int compose_page(const char *jpg, const char *out) {
     pdfn = 0;
     pdfn += snprintf(pdfbuf, sizeof pdfbuf, "q %.2f 0 0 %.2f 0 0 cm /Im1 Do Q\n", 1404 * PT, 1872 * PT);
     weather_block();
-    usage_block();
     FILE *o = fopen(out, "wb"); if (!o) { free(jd); return 0; }
     long off[8]; int n = 0;
     n += fprintf(o, "%%PDF-1.4\n");
@@ -404,18 +387,16 @@ static void swap_daily_page(void) {
     strftime(today, sizeof today, "%Y-%m-%d", &lt);
     char ppath[600]; snprintf(ppath, sizeof ppath, "%s/printed", dir);
     FILE *f = fopen(ppath, "r"); if (f) { if (fgets(printed, sizeof printed, f)) printed[strcspn(printed, "\r\n")] = 0; fclose(f); }
-    long printed_at = 0; char pday[16] = "", presets[64] = ""; sscanf(printed, "%15s %ld %63s", pday, &printed_at, presets);
-    char resets[64]; reset_texts(resets, sizeof resets);
+    long printed_at = 0; char pday[16] = ""; sscanf(printed, "%15s %ld", pday, &printed_at);
     int new_day = strcmp(pday, today) != 0, stale = wx.ok && now - printed_at > 6 * 3600 && wx.at > printed_at;
-    int resets_changed = resets[0] && strcmp(resets, presets) != 0;
-    if (!pdf[0] || (!new_day && !stale && !resets_changed)) return;
+    if (!pdf[0] || (!new_day && !stale)) return;
     if (!home_screen()) return;                       /* only between documents: the restart reloads the tablet's app */
     snprintf(src, sizeof src, "%s/pages/%s.jpg", dir, today);
     if (access(src, R_OK)) { static int said = 0; if (!said++) fprintf(stderr, "no printed page for %s in the stock\n", today); return; }
     snprintf(tmp, sizeof tmp, "%s.new", pdf);
     if (!compose_page(src, tmp) || rename(tmp, pdf)) { fprintf(stderr, "could not compose the page for %s\n", today); return; }
-    f = fopen(ppath, "w"); if (f) { fprintf(f, "%s %ld %s\n", today, (long)now, resets); fclose(f); }
-    fprintf(stderr, "printed page for %s composed (%s), restarting xochitl\n", today, new_day ? "new day" : stale ? "fresh weather" : "new reset times");
+    f = fopen(ppath, "w"); if (f) { fprintf(f, "%s %ld\n", today, (long)now); fclose(f); }
+    fprintf(stderr, "printed page for %s composed (%s), restarting xochitl\n", today, new_day ? "new day" : "fresh weather");
     if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
 }
 
@@ -490,7 +471,7 @@ int main(int argc, char **argv) {
         }
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
-        int changed[NZ], any = 0;
+        int changed[NZ], any = 0; char name[32];
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
         for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { draw_zone(z, shown[z], &lt, 1); if (page_lost) break; }   /* out with the old, along its own strokes */
         if (page_lost) continue;

@@ -1631,10 +1631,11 @@ GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmda
 # (font size, x, y) of a text origin.
 TABLET_DASH_LAYOUT = {
     "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565)},
-    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "pct1": (110, 105, 1235), "pct2": (110, 105, 1425)},
+    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (48, 335, 1054), "pct1": (110, 105, 1235), "reset1": (48, 335, 1244),
+              "pct2": (110, 105, 1425), "reset2": (48, 335, 1434)},
     "bars": [(LIVE_BAR_X[0], LIVE_BAR_X[1], y + 13) for y in LIVE_USAGE_ROWS],
 }
-GLYPH_SETS = {190: "0123456789:", 110: "0123456789"}
+GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 48: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:"}
 DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to compose and swap in by itself
 
 
@@ -1831,9 +1832,7 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         print(f"📄 Keeping the '{doc_title}' page already on the tablet (no push, no reload)", flush=True)
     else:
         today_pdf = stock / "today.pdf"
-        sub = fetch_claude_subscription_usage()
-        resets = [reset_text(r) for _, _, r in (sub or {}).get("windows", [])[:3]]
-        render_dashboard_image(tasks=tasks, live=True, weather=weather, resets=resets).save(today_pdf, "PDF", resolution=226.0)
+        render_dashboard_image(tasks=tasks, live=True, weather=weather).save(today_pdf, "PDF", resolution=226.0)
         print(f"📄 Pushing the '{doc_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
         doc_uuid = cmd_push(argparse.Namespace(file=str(today_pdf), folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
     content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
@@ -1848,7 +1847,7 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
         shutil.move(str(stock / "pages"), str(out / "pages"))
         shutil.rmtree(stock, ignore_errors=True)
         if not (no_push and existing):
-            (out / "printed").write_text(f"{datetime.now().strftime('%Y-%m-%d')} {int(time.time())} {'|'.join(resets)}\n")   # else the tablet keeps its own
+            (out / "printed").write_text(f"{datetime.now().strftime('%Y-%m-%d')} {int(time.time())}\n")   # else the tablet keeps its own
         (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\npdf={REMOTE_PATH}/{doc_uuid}.pdf\n"
                                     f"lat={loc.get('lat', 0)}\nlon={loc.get('lon', 0)}\ncity={loc.get('name', '')}\nminutes=15\n")
         if token:
@@ -2200,30 +2199,9 @@ def fetch_weather(city):
         return {"error": str(e)[:80]}
 
 
-RESET_TEXT = {"label": (22, 335, 60, 110), "time": (26, 335, 88, 60)}   # (font px, x, dy from the row, gray): the same in app/rmdash.c
-
-
-def draw_reset_text(draw, y_row, when):
-    """'resets' and the local day and time, printed under a usage row's percentage."""
-    size, x, dy, gray = RESET_TEXT["label"]
-    draw.text((x, y_row + dy), "resets", font=get_font(size), fill=gray)
-    size, x, dy, gray = RESET_TEXT["time"]
-    draw.text((x, y_row + dy), when, font=get_font(size, bold=True), fill=gray)
-
-
-def reset_text(resets_at):
-    """'TUE 14:59' in local time from the endpoint's ISO timestamp, '' when unknown."""
-    try:
-        local = datetime.fromisoformat(resets_at.replace("Z", "+00:00")).astimezone()
-        return local.strftime("%a %H:%M").upper()
-    except (AttributeError, ValueError, TypeError):
-        return ""
-
-
-def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False, now=None, pen_weather=False, resets=None):
+def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, habits=None, time_format="24h", claude_usage=None, subscription=None, live=False, weather=None, notes=False, clock=False, now=None, pen_weather=False):
     """`now` renders the page for another day (the tablet dashboard keeps a stock of coming days);
-    `pen_weather` prints only the weather header, the tablet adds the block itself; `resets` prints the
-    usage rows' reset times ("TUE 14:59" strings, one per row) under the pen-drawn percentages."""
+    `pen_weather` prints only the weather header, the tablet draws the values (TABLET_DASH_LAYOUT)."""
     from PIL import Image, ImageDraw
     im = Image.new("L", (1404, 1872), 255)
     draw = ImageDraw.Draw(im)
@@ -2316,12 +2294,10 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
         draw.rounded_rectangle([(80, 920), (550, 1560)], radius=12, outline=0, width=3)
         draw.text((105, 940), "CLAUDE USAGE", font=get_font(22, bold=True), fill=0)
         draw.line([(105, 975), (525, 975)], fill=200, width=1)
-        for i, (label, y_row) in enumerate(zip(("SESSION", "WEEK", "WEEK FABLE"), LIVE_USAGE_ROWS)):
+        for label, y_row in zip(("SESSION", "WEEK", "WEEK FABLE"), LIVE_USAGE_ROWS):
             draw.text((105, y_row), label, font=get_font(22, bold=True), fill=0)
             draw.rectangle([(LIVE_BAR_X[0] - 4, y_row), (LIVE_BAR_X[1] + 4, y_row + 26)], outline=0, width=2)
             draw.text((268, y_row + 128), "%", font=get_font(34, bold=True), fill=0)   # right after the pen-drawn number
-            if resets and i < len(resets) and resets[i]:
-                draw_reset_text(draw, y_row, resets[i])
     elif subscription and "windows" in subscription:
         draw.rounded_rectangle([(80, 920), (550, 1180)], radius=12, outline=0, width=3)
         draw.text((105, 940), "CLAUDE USAGE", font=get_font(22, bold=True), fill=0)
