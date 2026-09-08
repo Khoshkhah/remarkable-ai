@@ -1631,11 +1631,11 @@ GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmda
 # (font size, x, y) of a text origin.
 TABLET_DASH_LAYOUT = {
     "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565)},
-    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (48, 335, 1054), "pct1": (110, 105, 1235), "reset1": (48, 335, 1244),
-              "pct2": (110, 105, 1425), "reset2": (48, 335, 1434)},
+    "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (40, 335, 1058), "pct1": (110, 105, 1235), "reset1": (40, 335, 1248),
+              "pct2": (110, 105, 1425), "reset2": (40, 335, 1438)},
     "bars": [(LIVE_BAR_X[0], LIVE_BAR_X[1], y + 13) for y in LIVE_USAGE_ROWS],
 }
-GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 48: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:"}
+GLYPH_SETS = {190: "0123456789:", 110: "0123456789", 40: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:"}
 DASH_STOCK_DAYS = 60   # printed pages (date, calendar) the tablet gets to compose and swap in by itself
 
 
@@ -1715,12 +1715,13 @@ def stroke_glyph(ch, size, advance):
     return [[(left + x * k, 0.2 * size + y * k) for x, y in stroke] for stroke in strokes]
 
 
-ERASE_OFFSETS = (-6, 0, 6)   # eraser passes along a stroke: on its centreline and 6 px to each side
+ERASE_OFFSETS = (-10, -3.5, 3.5, 10)   # eraser passes along a stroke, sideways offsets in px: the pen overshoots
+                                        # the path by a few px at the outside of curves, the eraser cuts the corner
 SWEEP_LANE = 6               # lanes of a zone sweep: the eraser only takes a point of a wide stroke when it
                              # passes within a few px of the stroke's centreline (measured with a 27 px ballpoint)
 
 
-def erase_paths(path, ext=3):
+def erase_paths(path, ext=6):
     """Eraser passes that take a pen stroke drawn along `path` out again, whatever pen it was: along the
     stroke itself and offset sideways, run `ext` px past both ends (the pen's round caps)."""
     pts = [(float(x), float(y)) for x, y in path]
