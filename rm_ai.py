@@ -1,21 +1,12 @@
-#!/usr/bin/env python3
-"""
-rm-ai: Wireless AI Note Assistant for reMarkable 2
-"""
 import os
 import sys
 import json
 import argparse
 import subprocess
 import tempfile
-from pathlib import Path
-
-import os
-import sys
-import json
-import argparse
-import subprocess
-import tempfile
+import struct
+import time
+from datetime import datetime
 from pathlib import Path
 
 CONFIG_FILE = os.path.expanduser("~/.config/remarkable-ai/config.json")
@@ -409,31 +400,74 @@ def cmd_push(args):
     reader = PdfReader(str(pdf_to_upload))
     page_count = len(reader.pages)
 
-    doc_uuid = str(uuid.uuid4())
+    # Check if document already exists in target folder on tablet
+    existing_uuid = None
+    notebooks = list_notebooks(target_host)
+    for nb in notebooks:
+        nb_folder = nb.get("folder", "/")
+        is_same_folder = False
+        if folder_name:
+            is_same_folder = (nb_folder.lower().strip("/") == folder_name.lower().strip("/"))
+        else:
+            is_same_folder = (nb_folder in ("", "/"))
+        
+        if nb["title"].lower() == title.lower() and is_same_folder:
+            existing_uuid = nb["uuid"]
+            break
+
     ts = str(int(time.time() * 1000))
-    metadata = {
-        "deleted": False,
-        "lastModified": ts,
-        "metadatamodified": False,
-        "modified": False,
-        "parent": parent_uuid,
-        "pinned": False,
-        "synced": False,
-        "type": "DocumentType",
-        "version": 1,
-        "visibleName": title
-    }
-    content = {
-        "extraMetadata": {},
-        "fileType": "pdf",
-        "formatVersion": 2,
-        "lineHeight": -1,
-        "margins": 125,
-        "orientation": "portrait",
-        "pageCount": page_count,
-        "textScale": 1,
-        "zoomMode": "bestFit"
-    }
+    if existing_uuid and not getattr(args, "force_new", False):
+        doc_uuid = existing_uuid
+        print(f"🔄 Found existing document '{title}' in '{folder_name or '/'}' (UUID: {doc_uuid}). Updating in-place...")
+        is_update = True
+        try:
+            old_meta_raw = run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.metadata", host=target_host)
+            metadata = json.loads(old_meta_raw)
+            metadata["lastModified"] = ts
+            metadata["modified"] = True
+            metadata["synced"] = False
+        except Exception:
+            metadata = {
+                "deleted": False, "lastModified": ts, "metadatamodified": False,
+                "modified": True, "parent": parent_uuid, "pinned": False,
+                "synced": False, "type": "DocumentType", "version": 1, "visibleName": title
+            }
+        try:
+            old_content_raw = run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=target_host)
+            content = json.loads(old_content_raw)
+            content["pageCount"] = page_count
+        except Exception:
+            content = {
+                "extraMetadata": {}, "fileType": "pdf", "formatVersion": 2,
+                "lineHeight": -1, "margins": 125, "orientation": "portrait",
+                "pageCount": page_count, "textScale": 1, "zoomMode": "bestFit"
+            }
+    else:
+        doc_uuid = str(uuid.uuid4())
+        is_update = False
+        metadata = {
+            "deleted": False,
+            "lastModified": ts,
+            "metadatamodified": False,
+            "modified": False,
+            "parent": parent_uuid,
+            "pinned": False,
+            "synced": False,
+            "type": "DocumentType",
+            "version": 1,
+            "visibleName": title
+        }
+        content = {
+            "extraMetadata": {},
+            "fileType": "pdf",
+            "formatVersion": 2,
+            "lineHeight": -1,
+            "margins": 125,
+            "orientation": "portrait",
+            "pageCount": page_count,
+            "textScale": 1,
+            "zoomMode": "bestFit"
+        }
 
     print(f"📡 Uploading '{title}' ({page_count} pages) to reMarkable...")
     with tempfile.TemporaryDirectory() as upload_tmp:
@@ -625,6 +659,336 @@ def cmd_setup(args):
     print("\nSetup complete! AI agents are ready to use reMarkable wirelessly.")
 
 
+# ==============================================================================
+# Virtual Stylus & Real-Time Hardware Digitizer Injection (/dev/input/event1)
+# ==============================================================================
+
+EV_SYN = 0
+SYN_REPORT = 0
+
+EV_KEY = 1
+BTN_TOOL_PEN = 320     # 0x140
+BTN_TOOL_RUBBER = 321  # 0x141
+BTN_TOUCH = 330        # 0x14a
+
+EV_ABS = 3
+ABS_X = 0
+ABS_Y = 1
+ABS_PRESSURE = 24
+ABS_DISTANCE = 25
+ABS_TILT_X = 26
+ABS_TILT_Y = 27
+
+class VirtualStylus:
+    """Emulates real-time stylus input on reMarkable 2 Wacom I2C Digitizer (/dev/input/event1)."""
+    def __init__(self, host=None):
+        self.host = host or get_active_host()
+        self.proc = None
+
+    def connect(self):
+        if self.proc:
+            return
+        cmd = ["ssh", self.host, "dd of=/dev/input/event1 bs=16 2>/dev/null"]
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    def close(self):
+        if self.proc:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=2)
+            except Exception:
+                pass
+            self.proc = None
+
+    @staticmethod
+    def pack_event(ev_type, ev_code, ev_value):
+        t = time.time()
+        sec = int(t)
+        usec = int((t - sec) * 1_000_000)
+        return struct.pack("<IIHHi", sec, usec, ev_type, ev_code, ev_value)
+
+    @staticmethod
+    def display_to_digitizer(px, py):
+        # Portrait Display: 1404 x 1872
+        # Hardware Wacom Calibration:
+        # ABS_Y (0..15725) is horizontal (0=Left, 15725=Right)
+        # ABS_X (0..20966) is vertical (0=Bottom, 20966=Top)
+        abs_y = int(px * 15725 / 1404)
+        abs_x = int((1872 - py) * 20966 / 1872)
+        abs_y = max(0, min(15725, abs_y))
+        abs_x = max(0, min(20966, abs_x))
+        return abs_x, abs_y
+
+    def stroke(self, points, is_eraser=False, pressure=2500):
+        if not points:
+            return
+        if not self.proc:
+            self.connect()
+
+        tool = BTN_TOOL_RUBBER if is_eraser else BTN_TOOL_PEN
+        data = bytearray()
+
+        # 1. Tool Proximity In
+        data += self.pack_event(EV_KEY, tool, 1)
+        data += self.pack_event(EV_ABS, ABS_DISTANCE, 0)
+        data += self.pack_event(EV_SYN, SYN_REPORT, 0)
+
+        # 2. Touch Down at first point
+        start_x, start_y = self.display_to_digitizer(*points[0])
+        data += self.pack_event(EV_ABS, ABS_X, start_x)
+        data += self.pack_event(EV_ABS, ABS_Y, start_y)
+        data += self.pack_event(EV_ABS, ABS_PRESSURE, pressure)
+        data += self.pack_event(EV_KEY, BTN_TOUCH, 1)
+        data += self.pack_event(EV_SYN, SYN_REPORT, 0)
+
+        self.proc.stdin.write(data)
+        self.proc.stdin.flush()
+        time.sleep(0.006)
+
+        # 3. Intermediate move points
+        for pt in points[1:]:
+            dx, dy = self.display_to_digitizer(*pt)
+            d = bytearray()
+            d += self.pack_event(EV_ABS, ABS_X, dx)
+            d += self.pack_event(EV_ABS, ABS_Y, dy)
+            d += self.pack_event(EV_ABS, ABS_PRESSURE, pressure)
+            d += self.pack_event(EV_SYN, SYN_REPORT, 0)
+            self.proc.stdin.write(d)
+            self.proc.stdin.flush()
+            time.sleep(0.003)
+
+        # 4. Touch Up
+        data_up = bytearray()
+        data_up += self.pack_event(EV_ABS, ABS_PRESSURE, 0)
+        data_up += self.pack_event(EV_KEY, BTN_TOUCH, 0)
+        data_up += self.pack_event(EV_ABS, ABS_DISTANCE, 50)
+        data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
+
+        # 5. Tool Proximity Out
+        data_up += self.pack_event(EV_KEY, tool, 0)
+        data_up += self.pack_event(EV_SYN, SYN_REPORT, 0)
+
+        self.proc.stdin.write(data_up)
+        self.proc.stdin.flush()
+        time.sleep(0.006)
+
+
+DIGIT_SEGMENTS = {
+    '0': {'A', 'B', 'C', 'D', 'E', 'F'},
+    '1': {'B', 'C'},
+    '2': {'A', 'B', 'G', 'E', 'D'},
+    '3': {'A', 'B', 'G', 'C', 'D'},
+    '4': {'F', 'G', 'B', 'C'},
+    '5': {'A', 'F', 'G', 'C', 'D'},
+    '6': {'A', 'F', 'E', 'D', 'C', 'G'},
+    '7': {'A', 'B', 'C'},
+    '8': {'A', 'B', 'C', 'D', 'E', 'F', 'G'},
+    '9': {'A', 'B', 'C', 'D', 'F', 'G'},
+    ' ': set(),
+}
+
+class SevenSegmentDigit:
+    """Manages state and minimal-delta stroke transitions for a single 7-segment character."""
+    def __init__(self, stylus, top_left_x, top_left_y, width=32, height=56):
+        self.stylus = stylus
+        self.x = top_left_x
+        self.y = top_left_y
+        self.w = width
+        self.h = height
+        self.mid_y = top_left_y + height // 2
+        self.current_segments = set()
+        self.segment_coords = self._compute_segment_coords()
+
+    def _compute_segment_coords(self):
+        x, y, w, h, m = self.x, self.y, self.w, self.h, self.mid_y
+        gap = 3
+
+        def line(x1, y1, x2, y2, steps=4):
+            return [(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps)) for i in range(steps + 1)]
+
+        return {
+            'A': line(x + gap, y, x + w - gap, y),
+            'B': line(x + w, y + gap, x + w, m - gap),
+            'C': line(x + w, m + gap, x + w, y + h - gap),
+            'D': line(x + gap, y + h, x + w - gap, y + h),
+            'E': line(x, m + gap, x, y + h - gap),
+            'F': line(x, y + gap, x, m - gap),
+            'G': line(x + gap, m, x + w - gap, m),
+        }
+
+    def transition_to(self, char):
+        target = DIGIT_SEGMENTS.get(char, set())
+        to_turn_off = self.current_segments - target
+        to_turn_on = target - self.current_segments
+
+        # 1. Erase segments that turned off
+        for seg in to_turn_off:
+            coords = self.segment_coords[seg]
+            self.stylus.stroke(coords, is_eraser=True, pressure=2500)
+
+        # 2. Draw segments that turned on
+        for seg in to_turn_on:
+            coords = self.segment_coords[seg]
+            self.stylus.stroke(coords, is_eraser=False, pressure=2500)
+
+        self.current_segments = target
+        return len(to_turn_off) + len(to_turn_on)
+
+    def clear(self):
+        for seg in self.current_segments:
+            coords = self.segment_coords[seg]
+            self.stylus.stroke(coords, is_eraser=True, pressure=2500)
+        self.current_segments = set()
+
+
+class DigitalClock:
+    """Real-time 7-segment digital clock rendered directly via Virtual Stylus."""
+    def __init__(self, host=None, pos="top-right", format="HH:MM:SS"):
+        self.stylus = VirtualStylus(host=host)
+        self.pos = pos
+        self.format = format
+        self.digits = []
+        self.colon_coords = []
+        self._init_layout()
+
+    def _init_layout(self):
+        w, h = 32, 56
+        digit_gap = 10
+        colon_gap = 20
+
+        is_seconds_only = (self.format == "MM:SS")
+        num_digits = 4 if is_seconds_only else 6
+        num_colons = 1 if is_seconds_only else 2
+        total_w = num_digits * w + (num_digits - num_colons - 1) * digit_gap + num_colons * colon_gap
+
+        if self.pos == "top-right":
+            start_x, start_y = 1404 - total_w - 60, 60
+        elif self.pos == "top-left":
+            start_x, start_y = 60, 60
+        elif self.pos == "center":
+            start_x, start_y = (1404 - total_w) // 2, 900
+        elif self.pos == "bottom-right":
+            start_x, start_y = 1404 - total_w - 60, 1750
+        elif "," in self.pos:
+            parts = self.pos.split(",")
+            start_x, start_y = int(parts[0].strip()), int(parts[1].strip())
+        else:
+            start_x, start_y = 1404 - total_w - 60, 60
+
+        curr_x = start_x
+        self.digits = []
+        self.colon_coords = []
+
+        def add_digit():
+            nonlocal curr_x
+            self.digits.append(SevenSegmentDigit(self.stylus, curr_x, start_y, w, h))
+            curr_x += w + digit_gap
+
+        def add_colon():
+            nonlocal curr_x
+            curr_x -= digit_gap
+            mid_x = curr_x + colon_gap // 2
+            dot1 = [(mid_x, start_y + h // 3), (mid_x + 1, start_y + h // 3)]
+            dot2 = [(mid_x, start_y + 2 * h // 3), (mid_x + 1, start_y + 2 * h // 3)]
+            self.colon_coords.extend([dot1, dot2])
+            curr_x += colon_gap
+
+        if is_seconds_only:
+            add_digit()
+            add_digit()
+            add_colon()
+            add_digit()
+            add_digit()
+        else:
+            add_digit()
+            add_digit()
+            add_colon()
+            add_digit()
+            add_digit()
+            add_colon()
+            add_digit()
+            add_digit()
+
+    def run(self, duration=None, clear_on_exit=False):
+        print(f"⏰ Initializing Virtual Stylus Digital Clock at position: {self.pos}")
+        print(f"⚡ Minimum delta state machine active (only changed segments toggled per second).")
+        print(f"💡 Make sure a notebook page is open on your tablet screen.")
+        print(f"   Press Ctrl+C to stop.\n")
+        self.stylus.connect()
+        try:
+            # Draw stationary colons once
+            for dots in self.colon_coords:
+                self.stylus.stroke(dots, is_eraser=False, pressure=2500)
+
+            start_time = time.time()
+            last_sec = ""
+            while True:
+                now = datetime.now()
+                time_str = now.strftime("%M%S" if self.format == "MM:SS" else "%H%M%S")
+                if time_str != last_sec:
+                    last_sec = time_str
+                    total_changes = 0
+                    for digit, char in zip(self.digits, time_str):
+                        changes = digit.transition_to(char)
+                        total_changes += changes
+                    display_str = f"{time_str[:2]}:{time_str[2:]}" if self.format == "MM:SS" else f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
+                    print(f"  [{display_str}] Segments updated: {total_changes}")
+
+                if duration and (time.time() - start_time) >= duration:
+                    print(f"\n⏱️ Duration of {duration}s reached.")
+                    break
+
+                now_t = time.time()
+                sleep_t = 1.0 - (now_t % 1.0)
+                if sleep_t < 0.05:
+                    sleep_t += 1.0
+                time.sleep(sleep_t)
+        except KeyboardInterrupt:
+            print("\nClock stopped by user.")
+        finally:
+            if clear_on_exit:
+                print("🧹 Erasing clock strokes...")
+                for d in self.digits:
+                    d.clear()
+                for dots in self.colon_coords:
+                    self.stylus.stroke(dots, is_eraser=True, pressure=2500)
+            self.stylus.close()
+            print("Virtual stylus disconnected.")
+
+
+def cmd_clock(args):
+    host = get_active_host(args.device)
+    clock = DigitalClock(host=host, pos=args.pos, format=args.format)
+    clock.run(duration=args.duration, clear_on_exit=args.clear)
+
+
+def cmd_draw(args):
+    host = get_active_host(args.device)
+    stylus = VirtualStylus(host=host)
+    stylus.connect()
+    try:
+        if args.shape == "line":
+            p1 = [int(v.strip()) for v in args.from_coord.split(",")]
+            p2 = [int(v.strip()) for v in args.to_coord.split(",")]
+            steps = 20
+            points = [(int(p1[0] + (p2[0] - p1[0]) * i / steps), int(p1[1] + (p2[1] - p1[1]) * i / steps)) for i in range(steps + 1)]
+            print(f"✏️ Drawing line from {p1} to {p2}...")
+            stylus.stroke(points, is_eraser=args.eraser, pressure=args.pressure)
+            print("Done!")
+        elif args.shape == "box":
+            x, y = [int(v.strip()) for v in args.at.split(",")]
+            w, h = [int(v.strip()) for v in args.size.split(",")]
+            print(f"✏️ Drawing box at ({x}, {y}) size {w}x{h}...")
+            top = [(x + i, y) for i in range(0, w, 5)]
+            right = [(x + w, y + i) for i in range(0, h, 5)]
+            bottom = [(x + w - i, y + h) for i in range(0, w, 5)]
+            left = [(x, y + h - i) for i in range(0, h, 5)]
+            stylus.stroke(top + right + bottom + left + [(x, y)], is_eraser=args.eraser, pressure=args.pressure)
+            print("Done!")
+    finally:
+        stylus.close()
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="rm-ai: Wireless AI Note Assistant for reMarkable")
@@ -667,7 +1031,27 @@ def main():
     p_push.add_argument("file", type=str, help="Path to PDF or Markdown file to upload")
     p_push.add_argument("--folder", "-f", type=str, default=None, help="Target folder path on tablet (creates if missing)")
     p_push.add_argument("--title", "-t", type=str, default=None, help="Custom display title on tablet")
+    p_push.add_argument("--force-new", "-n", action="store_true", help="Always create a new duplicate file instead of updating existing document")
     p_push.set_defaults(func=cmd_push)
+
+    # clock
+    p_clock = subparsers.add_parser("clock", help="Real-time 7-segment digital clock via Virtual Stylus with minimal delta updates")
+    p_clock.add_argument("--pos", "-p", type=str, default="top-right", help="Screen position: top-right, top-left, center, bottom-right, or X,Y")
+    p_clock.add_argument("--format", choices=["HH:MM:SS", "MM:SS"], default="HH:MM:SS", help="Clock time format")
+    p_clock.add_argument("--duration", type=int, default=None, help="Duration in seconds to run (default: infinite)")
+    p_clock.add_argument("--clear", action="store_true", help="Erase the clock from screen on exit")
+    p_clock.set_defaults(func=cmd_clock)
+
+    # draw
+    p_draw = subparsers.add_parser("draw", help="Inject live vector strokes via Virtual Stylus")
+    p_draw.add_argument("shape", choices=["line", "box"], help="Shape type to draw")
+    p_draw.add_argument("--from", dest="from_coord", type=str, help="Start coordinate X,Y (for line)")
+    p_draw.add_argument("--to", dest="to_coord", type=str, help="End coordinate X,Y (for line)")
+    p_draw.add_argument("--at", type=str, help="Top-left coordinate X,Y (for box)")
+    p_draw.add_argument("--size", type=str, help="Width,Height (for box)")
+    p_draw.add_argument("--eraser", action="store_true", help="Use virtual eraser instead of pen")
+    p_draw.add_argument("--pressure", type=int, default=2500, help="Simulated pen pressure (0..4095)")
+    p_draw.set_defaults(func=cmd_draw)
 
     args = parser.parse_args()
     if not args.command:

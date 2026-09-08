@@ -147,7 +147,25 @@ rm-ai push notes.md --folder "AI-Summaries" --title "Morning Brief"
 
 # Target specific tablet
 rm-ai --device rm-alt read
+
+# Live 7-segment digital clock via Virtual Stylus (zero reload / zero restart)
+rm-ai clock --pos top-right
+rm-ai clock --pos center --duration 60 --clear
+
+# Live vector stroke injection
+rm-ai draw line --from 200,300 --to 800,300
+rm-ai draw box --at 400,500 --size 300,200
 ```
+
+---
+
+## Virtual Stylus & Minimal-Delta Clock Engine
+
+`remarkable-ai` provides direct hardware event injection into `/dev/input/event1` (`Wacom I2C Digitizer`):
+
+- **Real-Time Drawing**: Emulates physical stylus pressure, coordinates, and contact directly into the Linux input subsystem. The active page renders strokes instantly with zero page reload or tablet restart.
+- **7-Segment Minimal-Delta State Machine**: When running the digital clock, each digit is broken down into 7 discrete physical segments (A through G). On every second tick, only the segments that change state are toggled (virtual pen to turn on, virtual eraser to turn off).
+- **Zero Screen Churn**: Segments that remain unchanged are never touched, achieving the absolute mathematical minimum number of changes per second on the e-ink screen.
 
 ---
 
