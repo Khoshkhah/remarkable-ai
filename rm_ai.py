@@ -890,18 +890,25 @@ class VirtualStylus:
     PEN_HOVER = 0.0      # extra hover after an eraser->pen switch; measured unnecessary (0 works), knob kept
     ERASE_SETTLE = 0.15  # pause after every eraser stroke: erasing thick ink keeps xochitl busy, and a stroke
                          # sent meanwhile is dropped whole (measured: 0.1 s is enough, 0 loses every other one)
+    YIELD_SECONDS = 2.5  # the real pen shares this channel: stay away this long after it was last seen near the screen
     # ponytail: tuned on one rM2 (fw 3.x); raise FRAME_DT/lower STEP_PX if strokes still stretch
 
     def __init__(self, host=None):
         self.host = host or get_active_host()
         self.proc = None
         self.tool = None
+        self.reader = None       # second SSH stream reading the digitizer back, to notice the real pen
+        self.sent = {}           # (type, code, value) -> time we injected it, to tell our echo from the real pen
+        self.real_until = 0.0    # time until which the real pen is considered near the screen
 
     def connect(self):
         if self.proc:
             return
         cmd = ["ssh"] + get_ssh_base_opts() + [self.host, "dd of=/dev/input/event1 bs=16 2>/dev/null"]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        self.reader = subprocess.Popen(["ssh"] + get_ssh_base_opts() + [self.host, "cat /dev/input/event1"], stdout=subprocess.PIPE)
+        import threading
+        threading.Thread(target=self._watch_pen, daemon=True).start()
         self._lift_everything()
 
     def close(self):
@@ -913,6 +920,36 @@ class VirtualStylus:
             except Exception:
                 pass
             self.proc = None
+        if self.reader:
+            self.reader.kill()
+            self.reader = None
+            # the remote `cat` only dies on its next write, which may be never: stop it explicitly
+            subprocess.run(["ssh"] + get_ssh_base_opts() + [self.host, "kill $(pgrep -f '^cat /dev/input/event1') 2>/dev/null"], capture_output=True)
+
+    def _watch_pen(self):
+        """Every event on the digitizer that is not an echo of one we injected is the real pen: while it
+        is near the screen (hovering or writing) the virtual pen must stay off the channel, or the tablet
+        sees one stylus jumping between two hands."""
+        reader = self.reader
+        while reader and reader.poll() is None:
+            ev = reader.stdout.read(16)
+            if len(ev) < 16:
+                break
+            _, _, ev_type, code, value = struct.unpack("<IIHHi", ev)
+            if ev_type == EV_SYN or time.time() - self.sent.get((ev_type, code, value), 0) < 1.5:
+                continue
+            if time.time() >= self.real_until:
+                print("✋ real pen near the screen, pausing", flush=True)
+            self.real_until = time.time() + self.YIELD_SECONDS
+
+    def pen_near(self):
+        return time.time() < self.real_until
+
+    def wait_for_pen_gone(self):
+        if self.pen_near():
+            while self.pen_near():
+                time.sleep(0.1)
+            print("▶ resuming", flush=True)
 
     def _lift_everything(self):
         """Pen up, both tools out of proximity. A run killed mid-stroke leaves the digitizer with the
@@ -943,6 +980,11 @@ class VirtualStylus:
 
     def _frame(self, *events):
         """One evdev report: the given (type, code, value) events followed by SYN_REPORT, paced by FRAME_DT."""
+        now = time.time()
+        for t, c, v in events:
+            self.sent[(t, c, v)] = now
+        if len(self.sent) > 4000:
+            self.sent = {k: t for k, t in self.sent.items() if now - t < 2}
         data = b"".join(self.pack_event(t, c, v) for t, c, v in events)
         self.proc.stdin.write(data + self.pack_event(EV_SYN, SYN_REPORT, 0))
         self.proc.stdin.flush()
@@ -968,6 +1010,14 @@ class VirtualStylus:
 
         tool = BTN_TOOL_RUBBER if is_eraser else BTN_TOOL_PEN
         pressure = max(1, min(4095, pressure))   # the digitizer's 12-bit range
+        while True:
+            self.wait_for_pen_gone()
+            if self._send_stroke(points, tool, pressure, is_eraser):
+                return
+            # the real pen appeared mid-stroke: we lifted; wait, then redraw this stroke from the start
+
+    def _send_stroke(self, points, tool, pressure, is_eraser):
+        """One attempt at a stroke. Returns False if the real pen showed up and the stroke was cut short."""
         back_to_pen = self.tool == BTN_TOOL_RUBBER and tool == BTN_TOOL_PEN
         if self.tool is not None and tool != self.tool:
             time.sleep(self.TOOL_SETTLE)
@@ -993,6 +1043,9 @@ class VirtualStylus:
 
         # 3. Move. The kernel drops unchanged ABS values, so a 1-unit pressure wobble keeps every frame alive.
         for i, pt in enumerate(path[1:]):
+            if self.pen_near():
+                self._frame((EV_ABS, ABS_PRESSURE, 0), (EV_KEY, BTN_TOUCH, 0), (EV_ABS, ABS_DISTANCE, 60), (EV_KEY, tool, 0))
+                return False
             x, y = self.display_to_digitizer(*pt)
             self._frame((EV_ABS, ABS_X, x), (EV_ABS, ABS_Y, y), (EV_ABS, ABS_PRESSURE, pressure - (i & 1)))
 
@@ -1003,6 +1056,7 @@ class VirtualStylus:
         self._frame((EV_ABS, ABS_DISTANCE, 60), (EV_KEY, tool, 0))
         if is_eraser:
             time.sleep(self.ERASE_SETTLE)
+        return True
 
 
 DIGIT_SEGMENTS = {
