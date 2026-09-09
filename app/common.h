@@ -9,15 +9,27 @@ static int https(const char *host, const char *request, char *out, size_t cap) {
         FILE *f = fopen(p, "r"); if (!f) return -1;
         size_t n = fread(out, 1, cap - 1, f); out[n] = 0; fclose(f); return 200;
     }
-    char req[600]; snprintf(req, sizeof req, "%s/req", dir);
+    char req[600], errp[600]; snprintf(req, sizeof req, "%s/req", dir); snprintf(errp, sizeof errp, "%s/err", dir);
     FILE *f = fopen(req, "w"); if (!f) return -1;
     chmod(req, 0600); fputs(request, f); fclose(f);
-    char cmd[1200];
-    snprintf(cmd, sizeof cmd, "openssl s_client -quiet -ign_eof -connect %s:443 -servername %s -verify_return_error -CApath /etc/ssl/certs < %s 2>/dev/null & p=$!; "
-             "(sleep %d; kill $p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; kill $w 2>/dev/null", host, host, req, https_timeout);
+    /* the tablet's openssl s_client (3.5) drops the connection when its input arrives faster than it
+     * writes (a request over ~16 KB from a file or a pipe gets no answer, measured); fed 8 KB every
+     * 0.3 s through a fifo it is fine, and small requests cost one pause */
+    char fifo[600], cmd[2000]; snprintf(fifo, sizeof fifo, "%s/fifo", dir);
+    int chunks = (int)((strlen(request) + 8191) / 8192);
+    snprintf(cmd, sizeof cmd, "rm -f %s; mkfifo %s; (i=0; while [ $i -lt %d ]; do dd if=%s bs=8192 skip=$i count=1 2>/dev/null; sleep 0.3; i=$((i+1)); done > %s) & "
+             "openssl s_client -quiet -ign_eof -connect %s:443 -servername %s -verify_return_error -CApath /etc/ssl/certs < %s 2>%s & p=$!; "
+             "(sleep %d; kill $p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; kill $w 2>/dev/null; rm -f %s",
+             fifo, fifo, chunks, req, fifo, host, host, fifo, errp, https_timeout, fifo);
     FILE *pp = popen(cmd, "r"); if (!pp) return -1;
     size_t n = fread(out, 1, cap - 1, pp); out[n] = 0; pclose(pp); unlink(req);
-    if (n < 12 || strncmp(out, "HTTP/", 5)) return -1;
+    if (n < 12 || strncmp(out, "HTTP/", 5)) {   /* openssl's last words explain it */
+        char last[200] = ""; FILE *ef = fopen(errp, "r");
+        if (ef) { char line[200]; while (fgets(line, sizeof line, ef)) if (line[0] != '\n') snprintf(last, sizeof last, "%s", line); fclose(ef); }
+        last[strcspn(last, "\r\n")] = 0;
+        fprintf(stderr, "https: no response from %s (%zu bytes: %.60s) %s\n", host, n, out, last);
+        return -1;
+    }
     int status = atoi(out + 9);
     char *body = strstr(out, "\r\n\r\n");
     if (!body) return -1;
