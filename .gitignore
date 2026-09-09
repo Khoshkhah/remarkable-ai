@@ -16,4 +16,4 @@ sample_handwriting.png
 .env
 
 # rm-ai chat output (rendered messages, web page)
-chat/
+chat/\n\n# rm-ai vocab output (captured lookups, web page)\nvocab/\n

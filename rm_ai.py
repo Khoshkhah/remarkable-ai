@@ -2798,6 +2798,177 @@ def push_chat_document(host, title, pages=10, folder=None):
     return uuid_
 
 
+# ==============================================================================
+# Vocabulary: what you highlight on a PDF or box in a notebook, explained in simple English and Farsi
+# ==============================================================================
+
+def read_highlights(raw):
+    """(page-order start, text) of the highlighter marks in a .rm v6 page: xochitl stores the highlighted
+    text of a PDF/EPUB page itself, so a highlighted word or paragraph needs no recognition."""
+    import io
+    from rmscene import read_blocks
+    from rmscene.scene_stream import SceneGlyphItemBlock
+    out = []
+    for b in read_blocks(io.BytesIO(raw)):
+        if isinstance(b, SceneGlyphItemBlock) and b.item.value is not None and getattr(b.item.value, "text", None):
+            out.append((b.item.value.start or 0, " ".join(b.item.value.text.split())))
+    return out
+
+
+def sentence_around(page_text, phrase):
+    """The sentence of `page_text` that contains `phrase` (or its first words), for context; '' if not found."""
+    text = " ".join(page_text.split())
+    words = phrase.split()
+    probe = " ".join(words[:4]) if words else phrase
+    i = text.find(probe)
+    if i < 0:
+        return ""
+    start = max(text.rfind(". ", 0, i), text.rfind("? ", 0, i), text.rfind("! ", 0, i), text.rfind("\n", 0, i))
+    start = start + 2 if start >= 0 else 0
+    ends = [j for j in (text.find(". ", i), text.find("? ", i), text.find("! ", i)) if j >= 0]
+    end = min(ends) + 1 if ends else len(text)
+    return text[start:end].strip()
+
+
+VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabulary</title>
+<style>body{font:16px system-ui;margin:2em auto;max-width:56em;padding:0 1em} .e{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}
+.e img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em} .ctx{color:#444} .fa{direction:rtl;font-size:1.15em}</style>
+<h1>reMarkable vocabulary <span id="n" class="meta"></span></h1><div id="list"></div>
+<script>let last='';async function poll(){
+  try{ const r = await fetch('events.json?'+Date.now()); const ev = await r.json();
+    const sig = ev.length + ':' + (ev.length ? ev[ev.length-1].n + '/' + (ev[ev.length-1].explanation||'') : '');
+    if (sig !== last) { last = sig;
+      document.getElementById('n').textContent = ev.length + ' lookup' + (ev.length==1?'':'s');
+      document.getElementById('list').innerHTML = ev.slice().reverse().map(e =>
+        `<div class="e"><div class="meta">#${e.n} · ${e.time} · ${e.doc}${e.page ? ' p.'+e.page : ''} · ${e.kind}</div>
+         ${e.text ? '<p><b>'+e.text+'</b></p>' : ''}${e.context ? '<p class="ctx">'+e.context+'</p>' : ''}
+         ${e.image ? '<img src="'+e.image+'?'+Date.now()+'">' : ''}
+         ${e.read ? '<p><b>Read:</b> '+e.read+'</p>' : ''}${e.explanation ? '<p>'+e.explanation.replace(/\\n/g,'<br>')+'</p>' : ''}${e.farsi ? '<p class="fa">'+e.farsi+'</p>' : ''}</div>`).join(''); }
+  } catch(e) {} setTimeout(poll, 2000); } poll();</script>
+"""
+
+
+def cmd_vocab(args):
+    """Stage 1: watch the open document; a highlighter mark on a PDF (its text comes from the page file)
+    or a loop around handwriting in a notebook becomes an entry on a local web page."""
+    import http.server
+    import threading
+    host = get_active_host(getattr(args, "device", None))
+    out = Path(args.dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "index.html").write_text(VOCAB_PAGE)
+    events_file = out / "events.json"
+    events = json.loads(events_file.read_text()) if events_file.exists() else []
+    lock = threading.Lock()
+    docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
+    seen = set()    # (page id, start, text) of highlights already known
+    strokes = []    # real-pen strokes no loop has claimed yet
+
+    def emit(entry):
+        with lock:
+            entry["n"] = len(events) + 1
+            entry["time"] = datetime.now().strftime("%H:%M:%S")
+            events.append(entry)
+            events_file.write_text(json.dumps(events, indent=1, ensure_ascii=False))
+        what = entry.get("text") or entry.get("image")
+        print(f"📖 #{entry['n']} {entry['kind']} in '{entry['doc']}'{' p.' + str(entry['page']) if entry.get('page') else ''}: {what}", flush=True)
+
+    def doc_info(uuid_):
+        if uuid_ in docs:
+            return docs[uuid_]
+        meta = json.loads(run_ssh(f"cat {REMOTE_PATH}/{uuid_}.metadata", host=host))
+        content = json.loads(run_ssh(f"cat {REMOTE_PATH}/{uuid_}.content", host=host))
+        pages = [p["id"] if isinstance(p, dict) else p for p in (content.get("cPages", {}).get("pages") or content.get("pages") or [])
+                 if not (isinstance(p, dict) and p.get("deleted"))]
+        info = {"title": meta.get("visibleName", uuid_[:8]), "pages": pages, "pdf": None, "texts": {}}
+        if content.get("fileType") == "pdf":
+            local = out / f"{uuid_}.pdf"
+            if not local.exists():
+                subprocess.run(["scp", "-q"] + get_ssh_base_opts() + [f"{host}:{REMOTE_PATH}/{uuid_}.pdf", str(local)], check=False)
+            info["pdf"] = local if local.exists() else None
+        docs[uuid_] = info
+        return info
+
+    def page_text(info, index):
+        if info["pdf"] is None or index is None:
+            return ""
+        if index not in info["texts"]:
+            try:
+                from pypdf import PdfReader
+                info["texts"][index] = PdfReader(str(info["pdf"])).pages[index].extract_text() or ""
+            except Exception:
+                info["texts"][index] = ""
+        return info["texts"][index]
+
+    def on_stroke(pts):   # the pen: a loop around handwriting on any notebook page is a lookup
+        if not is_box(pts):
+            strokes.append(pts)
+            del strokes[:-400]
+            return
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        box = (min(xs), min(ys), max(xs), max(ys))
+        loop = pts[::max(1, len(pts) // 200)]
+        content = [s for s in strokes if sum(1 for q in s if inside(q, loop)) >= 0.6 * len(s)]
+        if not content:
+            return
+        for s in content:
+            strokes.remove(s)
+        uuid_ = open_document(host)
+        title = doc_info(uuid_)["title"] if uuid_ else "?"
+        n = len(events) + 1
+        image = f"ink-{n}.png"
+        render_strokes(content, box, out / image)
+        emit({"kind": "ink", "doc": title, "image": image, "box": [round(v) for v in box], "strokes": len(content)})
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(out), **k)
+        def log_message(self, *a):
+            pass
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    reader = PenReader(host, on_stroke)
+    threading.Thread(target=reader.run, daemon=True).start()
+    print(f"🌐 http://localhost:{args.port}  —  highlight a word or a paragraph on a PDF, or draw a loop around handwriting; Ctrl+C to stop", flush=True)
+    last = None   # (page file, mtime) last parsed
+    primed = set()
+    try:
+        while True:
+            uuid_ = open_document(host)
+            if uuid_:
+                try:
+                    newest = run_ssh(f"cd {REMOTE_PATH}/{uuid_} 2>/dev/null && ls -t *.rm 2>/dev/null | head -n 1 | xargs -r stat -c '%Y %n'", host=host).split()
+                except RuntimeError:
+                    newest = []
+                if len(newest) == 2 and (newest[1], newest[0]) != last:
+                    last = (newest[1], newest[0])
+                    page_id = newest[1][:-3]
+                    raw = subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"cat {REMOTE_PATH}/{uuid_}/{newest[1]}"], capture_output=True).stdout
+                    try:
+                        marks = read_highlights(raw)
+                    except Exception as e:
+                        marks = []
+                        print(f"⚠️  could not read the page's highlights: {str(e)[:80]}", flush=True)
+                    info = doc_info(uuid_)
+                    index = info["pages"].index(page_id) if page_id in info["pages"] else None
+                    fresh = [(page_id, st, tx) for st, tx in marks if (page_id, st, tx) not in seen]
+                    seen.update(fresh)
+                    if page_id not in primed:   # highlights made before the watcher started are not lookups
+                        primed.add(page_id)
+                        if fresh:
+                            print(f"· '{info['title']}' page {index + 1 if index is not None else '?'}: {len(fresh)} earlier highlight(s) skipped", flush=True)
+                    else:
+                        for _, st, tx in fresh:
+                            emit({"kind": "highlight", "doc": info["title"], "page": index + 1 if index is not None else None,
+                                  "text": tx, "context": sentence_around(page_text(info, index), tx)})
+            time.sleep(4)
+    except KeyboardInterrupt:
+        print("\nVocabulary watcher stopped.", flush=True)
+    finally:
+        if reader.proc:
+            reader.proc.kill()
+
+
 def cmd_chat(args):
     """Stage 1: detect looped handwriting on the chat document live and show it on a local web page;
     nothing is written back yet."""
@@ -3170,6 +3341,12 @@ def main():
     p_chat.add_argument("--doc", type=str, default="Chat", help="Title of the chat document on the tablet (pushed as blank pages if missing; default Chat)")
     p_chat.add_argument("--push", action="store_true", help="Push the chat document again (fresh blank pages), reloading the tablet")
     p_chat.set_defaults(func=cmd_chat)
+
+    # vocab
+    p_vocab = subparsers.add_parser("vocab", help="English learning: what you highlight on a PDF or loop in a notebook, captured (stage 1: local web page)")
+    p_vocab.add_argument("--dir", type=str, default="vocab", help="Folder for the captured lookups and the web page (default ./vocab)")
+    p_vocab.add_argument("--port", type=int, default=8766, help="Local web page port (default 8766)")
+    p_vocab.set_defaults(func=cmd_vocab)
 
     # dashboard
     p_dash = subparsers.add_parser("dashboard", aliases=["dash"], help="Turn tablet into a dedicated fullscreen desk clock & productivity dashboard")
