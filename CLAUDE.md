@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-module Python CLI (`rm_ai.py`, ~3400 lines) plus three C files in `app/` for the tablet that drives a reMarkable tablet over local
+A single-module Python CLI (`rm_ai.py`, ~3700 lines) plus three C programs in `app/` (`rmclock.c`, `rmdash.c`, `rmvocab.c`, sharing `stylus.h` for the pen and `common.h` for HTTPS, JSON and deflate) for the tablet that drives a reMarkable tablet over local
 Wi-Fi SSH: reads handwritten pages, renders them to PNG, pushes documents, injects live stylus
 strokes, and paints an e-ink dashboard onto the sleep screen. There is no package directory —
 `pyproject.toml` declares `py-modules = ["rm_ai"]` with entry points `rm-ai` / `rm_ai` → `rm_ai:main`
@@ -205,29 +205,37 @@ list of the usage endpoint behind Claude Code's `/usage`, read with the token in
 `~/.claude/.credentials.json`), `fetch_claude_usage()` (Admin API, needs `ANTHROPIC_ADMIN_KEY`); the
 pure `summarize_*` reducers are the tested parts. `--mode live` hands off to `DigitalClock`.
 
-**Vocabulary** (`cmd_vocab`, English learning). A watcher on the PC: every 4 s it takes the open
-document's newest `.rm` (the page on screen is the one whose file changed last), parses it with rmscene
-for `SceneGlyphItemBlock`s (`read_highlights`: xochitl stores the highlighted *text* of PDF/EPUB pages,
-`GlyphRange.text`) and for highlighter strokes over handwriting (`read_marked_ink`, pen strokes mostly
-inside the highlighter stroke's box); `PenReader` (as in the chat) turns a loop around handwriting into
-an image at once. Marks on a page untouched for 10 min at first sight are old and skipped; seen ones are
-keyed by page and text/mark across restarts (`events.json`). Loops around printed text are deliberately
-not supported: the tablet's "best fit" zoom crops each page to its content, so printed positions are not
-derivable from the PDF (two highlight rectangles proved the fit varies per document). `explain_with_gemini`
-(google-genai, `gemini-flash-latest` with fallbacks and 503/429 retries; the PC's key from
-`GEMINI_API_KEY`) returns JSON: `full` (the lesson in the shape `vocab/teacher.md` dictates, Farsi-first,
-with a "connection to previous concepts" fed the last 12 phrases) plus a short card (`meaning`, `note`,
-`examples`, `farsi`, `farsi_meaning`) for the web page. Every lesson is one markdown file
-(`lesson_markdown`, `vocab/lessons/<NNNN>-<phrase>.md`, front matter phrase/source/page/date) and one or
-more printed 1404×1872 page images next to it (`render_lesson_pages`: DejaVu via `LESSON_FONT`, each line
-in its own direction, Farsi lines shaped with raqm, right-to-left and right-aligned, English left-to-right,
-headings bold, the heading emoji and its variation selector stripped). `vocab_document_pdf` joins all
-`lessons/*.png` into one PDF and `push_vocab_document` pushes it as the **Vocabulary** document of the app
-folder (`cmd_push` with `rebuild=True`: a fresh `.content`, so xochitl regenerates the page list, and
-`fresh=True`: the `.rm` pen layer is dropped, so notes written on lesson pages do not survive a rebuild).
-The watcher rebuilds only while `open_document(host)` is empty (nothing open on the tablet: the push
-restarts xochitl) and remembers the pushed page count in `vocab/pushed.json`; `--install` pushes now,
-`--no-tablet` never. The full lesson also goes to the web page and, with `--vault`, to `vault_note`.
+**Vocabulary** (`app/rmvocab.c`, `cmd_vocab`; English learning): the third tablet-resident program, no PC
+needed. The learner writes a word and a sentence on the **Words** page (app folder; `push_chat_document`
+with a hint, one page) and draws a loop around the word. rmvocab watches the newest `.rm` of that document
+(`read_page`: a minimal v6 walk keeping the points, 14-byte v2 / 24-byte v1 records, x + 702), finds closed
+loops (`is_loop`, the port of `is_box`) with ink mostly inside (`content_of`, ray casting), and asks Gemini
+with two PNGs it encodes itself (the circled strokes at 2x, the whole page at 0.5x for the sentence), the
+method in `teacher.md` and the last 12 phrases, through `common.h`'s `https` (90 s; `models=` tried in turn
+on 503/429; the key is the `key` file, mode 600). The answer is plain text (`PHRASE:` / `CONTEXT:` / the
+lesson). `render_lesson` prints it onto 1404×1872 gray pages with the DejaVu glyph atlases
+`bake_lesson_atlases` bakes (`ATLU`: Unicode keys with the Arabic form in bits 21+; the joined forms are
+rendered by PIL+raqm around zero-width joiners, the lam-alef ligatures under U+FEF5..FEFC; the 60 px title
+font is Latin only): the tablet joins Farsi letters itself (`jclass`, `run_glyphs`) and orders each line with
+a simplified bidi (`draw_visual`: letters and digits L, Arabic R, neutrals take equal neighbours' direction
+else the paragraph's; a Farsi line, `is_rtl`, is right-aligned with runs placed right-to-left; brackets are
+mirrored in R runs), wraps on spaces (`paragraph`) and paginates; glyphs the atlas lacks (emoji) are skipped.
+Each page is one zlib stream `lessons/NNNN-<p>.z` beside `lessons/NNNN.txt` (phrase, context, source, blank,
+lesson). `build_pdf` joins every page into the Vocabulary PDF (FlateDecode gray images) and `rebuild_if_due`,
+only on the home screen and when the lesson count differs from `state`'s `pushed=`, swaps it in with a fresh
+`.content` (page count), drops the document's `.rm` files (handwriting on lesson pages does not survive),
+clears the Words page when every loop on it is done (`done`: loop signatures; a loop erased by hand is
+forgotten), touches `lastModified` and restarts xochitl. A check mark (`check.bin`) is drawn beside a loop
+whose lesson is made, under `page_on_screen()` for the Words document. `inbox/<name>.txt` (+ `.png`) are
+lookups the PC sends: the watcher (`cmd_vocab`) still reads highlights on PDFs/EPUBs (`read_highlights`) and
+highlighter/loop marks over handwriting in other notebooks (`read_marked_ink`, `PenReader`; the Words page is
+left to the tablet), sends them there, and mirrors every `lessons/NNNN.txt` back into
+`vocab/lessons/NNNN-<phrase>.md` (`lesson_markdown`), the web page and `--vault`. `install_vocab_app` ships
+the atlases, `check.bin`, `key`, `teacher.md`, `localtime`, `config` (doc= pdf= wdir= words=), the lessons
+made on the PC in tablet form (`local_lessons_for_tablet`: PNG → zlib) and the service, keeping the tablet's
+`lessons`, `done` and `inbox`. Loops around printed text are not supported (best-fit zoom crops pages; the
+highlighter is the tool). `RM_FIXTURES=<dir>` answers Gemini from `gemini.json` and skips the restart
+(`rmvocab <dir> [xochitl.conf] [event device]`; `journalctl -u rmvocab -f` on the tablet).
 
 ## Agent configuration lives in three places and is copied outward
 

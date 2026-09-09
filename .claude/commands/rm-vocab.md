@@ -1,15 +1,14 @@
 ---
-description: Learn English from what you mark on the tablet: highlights and looped handwriting explained by Gemini, in Farsi-first lessons, one printed page each in the tablet's Vocabulary document
+description: Learn English on the tablet: circle a word on the Words page and the tablet makes a Farsi-first lesson page in Vocabulary by itself; the PC watcher adds highlights from PDFs
 ---
 
-Run the vocabulary watcher (it runs until stopped):
+Install once (needs `GEMINI_API_KEY`), or run the optional watcher:
 ```bash
 rm-ai vocab $ARGUMENTS
 ```
-Highlight a word or paragraph on a PDF/EPUB, or highlight/loop handwriting in a notebook. Each mark
-becomes a lesson (Gemini, `GEMINI_API_KEY`, method in `vocab/teacher.md`): a markdown file and a printed
-page in `vocab/lessons/`, shown on http://localhost:8765, appended to `--vault <file>` (Obsidian) if given,
-and added as a page of the **Vocabulary** document in the tablet's app folder, which is rebuilt from all
-lesson pages the next time nothing is open on the tablet (one reload).
-Options: `--install` (push the document with all lessons so far now), `--no-tablet`,
-`--no-explain` (capture only), `--teacher <file>`, `--dir`, `--port`.
+`--install` puts the Words page, the Vocabulary document, the key, the method (`vocab/teacher.md`) and the
+program on the tablet. On the tablet: open **Words**, write a word and a sentence, draw a loop around the
+word; a check mark appears when the lesson is made, and Vocabulary is rebuilt (one printed page per lesson)
+the next time nothing is open. The watcher (no flags) sends highlights on PDFs/EPUBs and marks over
+handwriting in other notebooks to the tablet and mirrors every lesson into `vocab/lessons/*.md`,
+http://localhost:8765 and `--vault <file>`. Other options: `--teacher <file>`, `--dir`, `--port`.

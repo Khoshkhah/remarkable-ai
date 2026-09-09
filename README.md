@@ -275,20 +275,25 @@ the log is `ssh root@<tablet> journalctl -u rmdash -f`.
 
 ## Learning English on the tablet (`rm-ai vocab`)
 
-`rm-ai vocab` turns marks you make while reading into lessons. Highlight a word or a paragraph on a
-PDF or EPUB (the tablet stores the highlighted text itself, so it arrives exact, with the sentence
-around it), or highlight or loop a piece of handwriting in a notebook (it is read from the image).
-Each one goes to Gemini (`GEMINI_API_KEY`, free tier is enough) with the teaching method in
-`vocab/teacher.md`, a Farsi-first lesson in fixed sections: definition and meaning with the word's
-formation, structure and grammar with collocations, examples with translations, synonyms and
-antonyms, and a paragraph that connects the word to the ones learned before. The full lesson goes to
-a local web page (`http://localhost:8765`), to one markdown file per lesson in `vocab/lessons/`
-(`--vault <file>` also appends it to an Obsidian note), and to the tablet: each lesson is printed as a
-page (Farsi right-to-left, English left-to-right) and the **Vocabulary** document in the app folder is
-rebuilt from all lesson pages the next time nothing is open on the tablet (one reload; handwriting on
-those pages is dropped by a rebuild). `rm-ai vocab --install` pushes the document right away. Loops around *printed* text are not used: the tablet's
-best-fit zoom crops pages to their content, so printed positions cannot be read off the PDF; the
-highlighter is the tool there.
+The tablet makes the lessons itself. `rm-ai vocab --install` (with `GEMINI_API_KEY` set on the PC, once)
+puts a **Words** page and a **Vocabulary** document into the tablet's **app** folder, along with the
+lesson fonts, the teaching method (`vocab/teacher.md`), a copy of the key and a small program that runs as
+a service. Open **Words**, write a word and a sentence that uses it, and draw a loop around the word. The
+tablet reads the page file, sends the circled handwriting and the page to Gemini, prints the lesson
+(Farsi-first, in fixed sections: definition and meaning with the word's formation, structure and grammar
+with collocations, examples with translations, synonyms and antonyms, and a paragraph that connects the
+word to the ones learned before) and draws a check mark beside the loop. The next time you are on the
+home screen it rebuilds **Vocabulary** with one printed page per lesson (Farsi right-to-left, English
+left-to-right), clears the Words page and reloads once. No PC, no script: only the tablet and Gemini.
+
+The watcher on the PC (`rm-ai vocab`) is optional: while it runs, a highlight on a PDF or EPUB (the
+tablet stores the highlighted text itself, so it arrives exact, with the sentence around it) or a
+highlighter/loop mark over handwriting in another notebook is sent to the tablet, which makes the lesson
+the same way; the watcher also mirrors every lesson into `vocab/lessons/NNNN-<word>.md`, a local web page
+(`http://localhost:8765`) and, with `--vault <file>`, an Obsidian note. Loops around *printed* text are
+not used: the tablet's best-fit zoom crops pages to their content, so printed positions cannot be read
+off the PDF; the highlighter is the tool there. Handwriting on the lesson pages is dropped when the
+document is rebuilt.
 
 ### Clock that runs on the tablet itself (`rm-ai clock --install`)
 

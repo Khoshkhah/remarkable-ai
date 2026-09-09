@@ -694,8 +694,6 @@ def cmd_push(args):
                 "synced": False, "type": "DocumentType", "version": 1, "visibleName": title
             }
         try:
-            if getattr(args, "rebuild", False):   # the page set changed: a fresh content file, as on a first push
-                raise ValueError("rebuild")
             old_content_raw = run_ssh(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=target_host)
             content = json.loads(old_content_raw)
             content["pageCount"] = page_count
@@ -2816,8 +2814,8 @@ poll();
 </script>"""
 
 
-def push_chat_document(host, title, pages=10, folder=None):
-    """Push `pages` blank pages (a small header each) as the chat document; returns its uuid."""
+def push_chat_document(host, title, pages=10, folder=None, hint=None):
+    """Push `pages` blank pages (a small header each, `hint` printed under the first) as the chat document; returns its uuid."""
     from PIL import Image, ImageDraw
     ims = []
     for i in range(pages):
@@ -2825,6 +2823,8 @@ def push_chat_document(host, title, pages=10, folder=None):
         d = ImageDraw.Draw(im)
         d.text((80, 60), f"{title.upper()}  •  page {i + 1}", font=get_font(22, bold=True), fill=120)
         d.line([(80, 100), (1324, 100)], fill=200, width=2)
+        if hint and i == 0:
+            d.text((80, 120), hint, font=get_font(22), fill=150)
         ims.append(im)
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         pdf = f.name
@@ -2889,59 +2889,6 @@ def sentence_around(page_text, phrase):
     return text[start:end].strip()
 
 
-DEFAULT_TEACHER = ("You are an experienced English teacher for adult Farsi speakers at an intermediate level. Explain the word "
-                   "or phrase as a patient tutor would, in simple English, with usage and two examples, and give the Farsi.")
-
-
-def explain_with_gemini(text=None, context=None, image_path=None, teacher=None, previous=None):
-    """Simple-English meaning, a usage note, two examples and the Farsi of `text` (or of the handwriting
-    in `image_path`, transcribed first), from Gemini with GEMINI_API_KEY. `teacher` is the persona and
-    method (vocab/teacher.md by default: paste your own teaching instructions there). Returns a dict or {"error"}."""
-    import os
-    key = os.getenv("GEMINI_API_KEY") or load_config().get("gemini_api_key")
-    if not key:
-        return {"error": "no GEMINI_API_KEY (export it, or rm-ai setup --gemini-key)"}
-    try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=key)
-        models = ("gemini-flash-latest", "gemini-3.5-flash", "gemini-flash-lite-latest")   # the alias first; the free tier answers 503 under load
-
-        def ask(contents, **cfg):
-            last = None
-            for model in models:
-                for attempt in range(2):
-                    try:
-                        return client.models.generate_content(model=model, contents=contents, config=types.GenerateContentConfig(**cfg))
-                    except Exception as e:
-                        last = e
-                        if "503" not in str(e) and "429" not in str(e):
-                            raise
-                        time.sleep(2)
-            raise last
-
-        if image_path:
-            from PIL import Image
-            read = ask([Image.open(image_path), "Transcribe the handwritten English in this image exactly, nothing else."]).text.strip()
-            text = read
-        prompt = ((teacher or DEFAULT_TEACHER).strip() + "\n\nReply as JSON with these keys: "
-                  "\"phrase\" (the word or phrase, corrected if misspelt), "
-                  "\"full\" (the complete lesson as plain text with line breaks, in the shape the instructions above describe), "
-                  "and, for a short card written by hand on a small e-ink page: "
-                  "\"meaning\" (the meaning in simple English, one or two short sentences, with the part of speech in parentheses), "
-                  "\"note\" (one short sentence: the most useful collocation or usage point), "
-                  "\"examples\" (two short natural example sentences), "
-                  "\"farsi\" (the Farsi translation of the phrase), "
-                  "\"farsi_meaning\" (one short sentence in Farsi explaining it). "
-                  f"\nWord or phrase: {text!r}." + (f" It was read in this sentence: {context!r}." if context else "")
-                  + (f"\nWords learned earlier, for the connection section: {', '.join(previous)}." if previous else ""))
-        out = json.loads(ask(prompt, response_mime_type="application/json").text)
-        if image_path:
-            out["read"] = text
-        return out
-    except Exception as e:
-        return {"error": str(e)[:160]}
-
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
 LESSON_FONT = {"regular": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"}
@@ -2956,98 +2903,6 @@ def lesson_markdown(entry):
         body += [f"> {entry['context']}", ""]
     body.append((entry.get("full") or entry.get("explanation") or "").strip())
     return "\n".join(head + body) + "\n"
-
-
-def render_lesson_pages(entry):
-    """The lesson as printed page image(s), 1404x1872: the phrase as a title, then the lesson line by line,
-    Farsi lines right-to-left and right-aligned, English lines left-to-right, headings in bold."""
-    from PIL import Image, ImageDraw, ImageFont
-    W, H, L, R, TOP, BOTTOM = 1404, 1872, 80, 1324, 90, 1790
-    fonts = {k: ImageFont.truetype(LESSON_FONT["bold" if k in ("title", "head") else "regular"], v) for k, v in (("title", 60), ("head", 34), ("body", 30), ("meta", 22))}
-    text = (entry.get("full") or entry.get("explanation") or "").replace("**", "")
-    text = re.sub(r"^\s*[\U0001F300-\U0001FAFF\u2600-\u27BF\u2700-\u27BF][\uFE0E\uFE0F\u200D]*\s*", "", text, flags=re.M)   # the emoji and its variation selector off the headings (DejaVu shows the selector as a dotted circle)
-    heads = ("Definition & Meaning", "Structure & Grammar", "Examples & Translations", "Synonyms & Antonyms", "Connection to Previous")
-
-    def rtl(line):
-        return bool(PERSIAN.search(line)) and (len(PERSIAN.findall(line)) >= len(re.findall("[A-Za-z]", line)) / 2)
-
-    def wrap(line, font, is_rtl):
-        kw = {"direction": "rtl", "language": "fa"} if is_rtl else {}
-        out, cur = [], ""
-        for word in line.split():
-            trial = (cur + " " + word).strip()
-            if cur and font.getlength(trial, **kw) > R - L:
-                out.append(cur)
-                cur = word
-            else:
-                cur = trial
-        return out + ([cur] if cur else [])
-
-    pages, im, d, y = [], None, None, TOP
-
-    def new_page():
-        nonlocal im, d, y
-        im = Image.new("L", (W, H), 255)
-        d = ImageDraw.Draw(im)
-        pages.append(im)
-        y = TOP
-
-    new_page()
-    d.text((L, y), entry.get("phrase") or entry.get("text") or "?", font=fonts["title"], fill=0)
-    y += 80
-    meta = f"{entry.get('doc', '')}{'  •  p.' + str(entry['page']) if entry.get('page') else ''}  •  {datetime.now().strftime('%Y-%m-%d')}"
-    d.text((L, y), meta, font=fonts["meta"], fill=110)
-    y += 44
-    if entry.get("context"):
-        for ln in wrap(entry["context"], fonts["meta"], False):
-            d.text((L, y), ln, font=fonts["meta"], fill=80)
-            y += 30
-    y += 20
-    d.line([(L, y), (R, y)], fill=0, width=2)
-    y += 26
-    for raw in text.split("\n"):
-        line = raw.strip()
-        if not line:
-            y += 16
-            continue
-        is_head = any(h in line for h in heads)
-        font = fonts["head" if is_head else "body"]
-        is_rtl = rtl(line)
-        if is_head:
-            y += 12
-        for ln in wrap(line, font, is_rtl):
-            if y > BOTTOM - 40:
-                new_page()
-            if is_rtl:
-                d.text((R, y), ln, font=font, fill=0, direction="rtl", language="fa", anchor="ra")
-            else:
-                d.text((L, y), ln, font=font, fill=0)
-            y += 46 if is_head else 40
-        if is_head:
-            y += 6
-    return pages
-
-
-def vocab_document_pdf(lessons_dir, out_pdf):
-    """All lesson page images so far, in order, as one PDF: the Vocabulary document."""
-    from PIL import Image
-    images = [Image.open(p) for p in sorted(Path(lessons_dir).glob("*.png"))]
-    if not images:
-        return 0
-    images[0].save(out_pdf, "PDF", resolution=226.0, save_all=True, append_images=images[1:])
-    return len(images)
-
-
-def push_vocab_document(host, lessons_dir, doc_title="Vocabulary"):
-    """Rebuild the Vocabulary document from every lesson page and push it into the app folder (one reload)."""
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        pdf = f.name
-    n = vocab_document_pdf(lessons_dir, pdf)
-    if not n:
-        return None
-    uuid_ = cmd_push(argparse.Namespace(file=pdf, folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, rebuild=True, device=None))
-    os.unlink(pdf)
-    return uuid_
 
 
 def vault_note(path, entry):
@@ -3083,7 +2938,7 @@ VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabular
     if (sig !== last) { last = sig;
       document.getElementById('n').textContent = ev.length + ' lookup' + (ev.length==1?'':'s');
       document.getElementById('list').innerHTML = ev.slice().reverse().map(e =>
-        `<div class="e"><div class="meta">#${e.n} · ${e.time} · ${e.doc}${e.page ? ' p.'+e.page : ''} · ${e.kind}</div>
+        `<div class="e"><div class="meta">${e.n ? '#'+e.n+' · ' : ''}${e.time} · ${e.doc}${e.page ? ' p.'+e.page : ''} · ${e.kind}</div>
          ${e.text ? '<p><b>'+e.text+'</b></p>' : ''}${e.context ? '<p class="ctx">'+e.context+'</p>' : ''}
          ${e.image ? '<img src="'+e.image+'?'+Date.now()+'">' : ''}
          ${e.read ? '<p><b>Read:</b> '+e.read+'</p>' : ''}${e.explanation ? '<div class="lesson">'+e.explanation.split(/\\n/).map(l => '<div dir="auto">'+(l.trim()||'&nbsp;')+'</div>').join('')+'</div>' : ''}${e.farsi_line ? '<p dir="auto" class="fa"><b>'+e.farsi_line+'</b></p>' : ''}</div>`).join(''); }
@@ -3091,91 +2946,236 @@ VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabular
 """
 
 
+TABLET_VOCAB_DIR = "/home/root/.local/share/rmvocab"
+LESSON_FONTS = ((60, True), (34, True), (30, False), (22, False))   # title, headings, body, meta of a lesson page (app/rmvocab.c)
+
+
+def bake_lesson_atlases(out):
+    """Glyph bitmaps of DejaVu Sans for the lesson pages rmvocab prints, one f<size><b|r>.atlas per
+    LESSON_FONTS entry: 'ATLU', count (u32), then per glyph its key (u32: the Arabic form 0 isolated /
+    1 initial / 2 medial / 3 final in bits 21+, the codepoint below; the lam-alef ligatures under
+    U+FEF5..U+FEFC), left, top, width, height, advance (int16 each, PIL's placement from the text origin)
+    and width*height coverage bytes; keys sorted. The joined forms are rendered by PIL+raqm with
+    zero-width joiners around the letter, so the tablet only picks the form: it joins the Farsi letters
+    and orders the lines itself (there is no shaping library on board). The title font holds Latin only."""
+    from PIL import Image, ImageDraw, ImageFont
+    zwj = "‍"
+    latin = list(range(32, 127)) + list(range(160, 256)) + [0x2010, 0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x2039, 0x203A, 0x2190, 0x2192, 0x2212, 0x2713]
+    right_joining = {0x0622, 0x0623, 0x0624, 0x0625, 0x0627, 0x0629, 0x062F, 0x0630, 0x0631, 0x0632, 0x0648, 0x0649, 0x0698}
+    letters = list(range(0x0621, 0x064B)) + [0x0640, 0x067E, 0x0686, 0x0698, 0x06A9, 0x06AF, 0x06BE, 0x06C0, 0x06CC]
+    other = [0x060C, 0x061B, 0x061F, 0x066A, 0x066B, 0x066C] + list(range(0x0660, 0x066A)) + list(range(0x06F0, 0x06FA))
+    for size, bold in LESSON_FONTS:
+        font = ImageFont.truetype(LESSON_FONT["bold" if bold else "regular"], size)
+        entries = [(cp, chr(cp), False) for cp in latin]
+        if size != 60:
+            entries += [(cp, chr(cp), True) for cp in other]
+            for cp in letters:
+                ch = chr(cp)
+                forms = [(0, ch)]
+                if cp in right_joining:
+                    forms.append((3, zwj + ch))
+                elif cp != 0x0621:
+                    forms += [(1, ch + zwj), (2, zwj + ch + zwj), (3, zwj + ch)]
+                entries += [(form << 21 | cp, text, True) for form, text in forms]
+            for i, alef in enumerate((0x0622, 0x0623, 0x0625, 0x0627)):
+                lig = "ل" + chr(alef)
+                entries += [(0xFEF5 + 2 * i, lig, True), (0xFEF6 + 2 * i, zwj + lig, True)]
+        blob = bytearray(b"ATLU") + struct.pack("<I", len(entries))
+        pad = 4
+        for key, text, rtl in sorted(entries):
+            kw = {"direction": "rtl", "language": "fa"} if rtl else {}
+            l, t, r, b = font.getbbox(text, **kw)
+            w, h = max(0, r - l), max(0, b - t)
+            px = b""
+            if w and h:
+                ox, oy = pad - min(l, 0), pad - min(t, 0)
+                im = Image.new("L", (r + ox + pad, b + oy + pad), 0)
+                ImageDraw.Draw(im).text((ox, oy), text, font=font, fill=255, **kw)
+                px = im.crop((l + ox, t + oy, r + ox, b + oy)).tobytes()
+            blob += struct.pack("<Ihhhhh", key, l, t, w, h, round(font.getlength(text, **kw))) + px
+        (out / f"f{size}{'b' if bold else 'r'}.atlas").write_bytes(bytes(blob))
+
+
+def local_lessons_for_tablet(lessons_dir, out):
+    """Lessons made on the PC earlier (NNNN-<phrase>.md with page PNGs) in rmvocab's form: NNNN.txt
+    (phrase, context, source, blank, lesson) and NNNN-<p>.z (a zlib stream of the 1404x1872 gray page)."""
+    import zlib
+    from PIL import Image
+    n = 0
+    for md in sorted(Path(lessons_dir).glob("[0-9][0-9][0-9][0-9]-*.md")):
+        no, stem = md.name[:4], md.stem
+        text = md.read_text(encoding="utf-8")
+        parts = text.split("---\n", 2)
+        fm = dict(re.findall(r'^(\w+): "?(.*?)"?$', parts[1], flags=re.M)) if len(parts) == 3 else {}
+        body = parts[-1].strip().split("\n")
+        context = next((l[2:] for l in body if l.startswith("> ")), "-")
+        lesson = "\n".join(l for l in body[1:] if not l.startswith("> ")).strip()
+        source = fm.get("source", "") + (f" p.{fm['page']}" if fm.get("page") else "")
+        (out / f"{no}.txt").write_text(f"{fm.get('phrase') or body[0].lstrip('# ')}\n{context or '-'}\n{source}\n\n{lesson}\n", encoding="utf-8")
+        pages = [md.with_suffix(".png")] + sorted(md.parent.glob(f"{stem}-[0-9]*.png"), key=lambda q: int(q.stem.rsplit("-", 1)[1]))
+        for i, png in enumerate(q for q in pages if q.exists()):
+            (out / f"{no}-{i + 1}.z").write_bytes(zlib.compress(Image.open(png).convert("L").resize((1404, 1872)).tobytes(), 6))
+        n += 1
+    return n
+
+
+def install_vocab_app(host, lessons_dir, teacher_file, doc_title="Vocabulary", words_title="Words"):
+    """Put the vocabulary program on the tablet: the Words page and the Vocabulary document in the app
+    folder, the Gemini key, the teaching method, the lesson fonts, the lessons made so far, and
+    app/rmvocab with a systemd unit. The tablet then makes lessons for the words circled on the Words
+    page by itself; the PC's watcher only adds what it highlights elsewhere."""
+    import shutil
+    binary = Path(__file__).resolve().with_name("app") / "rmvocab"
+    if not binary.exists():
+        print("❌ app/rmvocab is missing: build it with app/build.sh (needs Docker)")
+        return None
+    key = os.getenv("GEMINI_API_KEY") or load_config().get("gemini_api_key")
+    if not key:
+        print("❌ no GEMINI_API_KEY: the tablet asks Gemini with its own copy of the key")
+        return None
+    run_ssh_retry("systemctl stop rmvocab 2>/dev/null; true", host=host)   # never push (the app restarts) under a running program
+    nbs = list_notebooks(host)
+    find = lambda title: next((nb["uuid"] for nb in nbs if nb["title"].lower() == title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
+    words_uuid, doc_uuid = find(words_title), find(doc_title)
+    if not words_uuid:
+        print(f"📄 Pushing the '{words_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
+        words_uuid = push_chat_document(host, words_title, pages=1, folder=CLOCK_FOLDER,
+                                        hint="Write a word and a sentence with it, then draw a loop around the word: its lesson becomes a page of Vocabulary.")
+    if not doc_uuid:
+        from PIL import Image, ImageDraw
+        im = Image.new("L", (1404, 1872), 255)
+        ImageDraw.Draw(im).text((80, 90), doc_title, font=get_font(60, bold=True), fill=0)
+        ImageDraw.Draw(im).text((80, 190), "The lessons appear here, one page each.", font=get_font(22), fill=120)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            im.save(f.name, "PDF", resolution=226.0)
+            print(f"📄 Pushing the '{doc_title}' document into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
+            doc_uuid = cmd_push(argparse.Namespace(file=f.name, folder=CLOCK_FOLDER, title=doc_title, force_new=False, margins=0, fresh=True, device=None))
+        os.unlink(f.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        bake_lesson_atlases(out)
+        rec = StrokeRecorder()
+        rec.stroke([(0, 14), (9, 24), (28, 0)], pressure=4000)
+        (out / "check.bin").write_bytes(rec.take())
+        (out / "key").write_text(key + "\n")
+        os.chmod(out / "key", 0o600)
+        if teacher_file:
+            shutil.copy(teacher_file, out / "teacher.md")
+        if os.path.exists("/etc/localtime"):
+            shutil.copy("/etc/localtime", out / "localtime")
+        (out / "config").write_text(f"doc={doc_uuid}\npdf={REMOTE_PATH}/{doc_uuid}.pdf\nwdir={REMOTE_PATH}/{words_uuid}\nwords={words_uuid}\n")
+        (out / "lessons").mkdir()
+        have = set(run_ssh_retry(f"ls {TABLET_VOCAB_DIR}/lessons 2>/dev/null; true", host=host).split())   # SSH drops for a moment after a push
+        n_local = local_lessons_for_tablet(lessons_dir, out / "lessons")
+        for f in list((out / "lessons").iterdir()):   # the tablet's own copies are the newer ones
+            if f.name in have:
+                f.unlink()
+        shutil.copy(binary, out / "rmvocab")
+        (out / "rmvocab.service").write_text(RMCLOCK_UNIT.replace("rmclock", "rmvocab").replace(TABLET_APP_DIR, TABLET_VOCAB_DIR)
+                                             .replace("clock, drawn by the tablet while its Clock document is open", "vocabulary: lessons for the words circled on the Words page, made by the tablet"))
+        print(f"📦 Installing the lesson fonts, {n_local} lessons made here and the vocabulary program on the tablet...", flush=True)
+        # the tablet keeps its lessons, the loops already done and the PC's lookups not yet answered; `state` goes so the document is rebuilt
+        run_ssh(f"mkdir -p {TABLET_VOCAB_DIR} && cd {TABLET_VOCAB_DIR} && for f in $(ls | grep -v -x -e lessons -e done -e inbox); do rm -rf $f; done; true", host=host)
+        tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
+        subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_VOCAB_DIR} -xf -"], input=tar, check=True)
+    run_ssh(f"chmod +x {TABLET_VOCAB_DIR}/rmvocab && chmod 600 {TABLET_VOCAB_DIR}/key && mv {TABLET_VOCAB_DIR}/rmvocab.service /etc/systemd/system/ && "
+            "systemctl daemon-reload && systemctl enable rmvocab >/dev/null 2>&1 && systemctl restart rmvocab", host=host)
+    cfg = load_config()
+    cfg["vocab_app"] = {"doc": doc_uuid, "words": words_uuid}
+    save_config(cfg)
+    print(f"✅ Vocabulary installed: open '{words_title}' on the tablet, write a word and a sentence, draw a loop around the word; "
+          f"the tablet asks Gemini, prints the lesson and rebuilds '{doc_title}' with it when you are back on the home screen. "
+          f"Log: ssh {host} journalctl -u rmvocab -f")
+    return words_uuid
+
+
+def uninstall_vocab_app(host):
+    run_ssh(f"systemctl disable --now rmvocab >/dev/null 2>&1; rm -f /etc/systemd/system/rmvocab.service; systemctl daemon-reload; rm -rf {TABLET_VOCAB_DIR}", host=host)
+    cfg = load_config()
+    cfg.pop("vocab_app", None)
+    save_config(cfg)
+    print("🗑️  Vocabulary program removed from the tablet (the Words page and the Vocabulary document are kept)")
+
+
 def cmd_vocab(args):
-    """Stage 1: watch the open document; a highlighter mark on a PDF (its text comes from the page file)
-    or a loop around handwriting in a notebook becomes an entry on a local web page."""
+    """The PC side of the vocabulary: `--install` puts rmvocab on the tablet (the Words page is then handled
+    there, no PC needed); the watcher sends what is highlighted on PDFs/EPUBs (text) or marked over handwriting
+    in other notebooks (image) to the tablet's inbox, and mirrors every lesson the tablet makes into
+    vocab/lessons/NNNN-<phrase>.md, the local web page and the vault."""
     import http.server
     import threading
     host = get_active_host(getattr(args, "device", None))
     out = Path(args.dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(VOCAB_PAGE)
+    lessons = out / "lessons"
+    lessons.mkdir(exist_ok=True)
+    teacher_file = Path(getattr(args, "teacher", None) or out / "teacher.md")
+    if getattr(args, "install", False):
+        if not install_vocab_app(host, lessons, teacher_file if teacher_file.exists() else None):
+            return
+    words_uuid = (load_config().get("vocab_app") or {}).get("words")
+    if not words_uuid:
+        print("ℹ️  The tablet has no vocabulary program yet: run `rm-ai vocab --install` (with GEMINI_API_KEY set)")
     events_file = out / "events.json"
     events = json.loads(events_file.read_text()) if events_file.exists() else []
     lock = threading.Lock()
-    if getattr(args, "install", False):
-        if push_vocab_document(host, lessons):
-            pushed["pages"] = len(list(lessons.glob("*.png")))
-            pushed_file.write_text(json.dumps(pushed))
-            pending["push"] = False
-        else:
-            print("📄 No lessons yet; the Vocabulary document is pushed with the first one")
     docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
     seen = {(e["page_id"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
     seen_marks = {(e["page_id"], tuple(e["mark"])) for e in events if e.get("kind") == "ink" and "mark" in e}
     strokes = []    # real-pen strokes no loop has claimed yet
-
-    counter = [max((e.get("n", 0) for e in events), default=0)]
-
-    def next_n():
-        with lock:
-            counter[0] += 1
-            return counter[0]
-
-    explain = getattr(args, "explain", True) and bool(os.getenv("GEMINI_API_KEY") or load_config().get("gemini_api_key"))
-    tablet = getattr(args, "tablet", True)
-    lessons = out / "lessons"
-    lessons.mkdir(exist_ok=True)
-    pushed_file = out / "pushed.json"
-    pushed = json.loads(pushed_file.read_text()) if pushed_file.exists() else {"pages": 0}
-    pending = {"push": len(list(lessons.glob("*.png"))) != pushed["pages"]}   # lesson pages the document does not have yet
+    mirrored = {q.name[:4] for q in lessons.glob("[0-9][0-9][0-9][0-9]-*.md")}
+    vault = getattr(args, "vault", None)
 
     def save_events():
         events_file.write_text(json.dumps(events, indent=1, ensure_ascii=False))
 
-    def explain_and_write(entry):
-        """In a worker thread: Gemini, the tablet's queue, the vault, the web page."""
-        teacher_file = Path(getattr(args, "teacher", None) or out / "teacher.md")
-        teacher = teacher_file.read_text() if teacher_file.exists() else None
-        with lock:
-            previous = [e["phrase"] for e in events if e.get("phrase") and e is not entry][-12:]
-        r = explain_with_gemini(text=entry.get("text"), context=entry.get("context"), image_path=str(out / entry["image"]) if entry.get("image") else None,
-                                teacher=teacher, previous=previous)
-        with lock:
-            if "error" in r:
-                entry["explanation"] = "⚠️ " + r["error"]
-                save_events()
-                print(f"⚠️  #{entry['n']}: {r['error']}", flush=True)
-                return
-            entry.update({k: r[k] for k in ("phrase", "meaning", "note", "examples", "farsi", "farsi_meaning", "read", "full") if k in r})
-            entry["explanation"] = r.get("full") or f"{r.get('meaning', '')}\n{r.get('note', '')}\n" + "\n".join("- " + e for e in r.get("examples") or [])
-            entry["farsi_line"] = f"{r.get('farsi', '')} — {r.get('farsi_meaning', '')}"
-            save_events()
-            print(f"💡 #{entry['n']} {r.get('phrase')}: {r.get('meaning', '')[:80]} | {r.get('farsi', '')}", flush=True)
-            stem = f"{entry['n']:04d}-" + re.sub(r"[^A-Za-z0-9]+", "-", entry.get("phrase") or "entry").strip("-")[:40]
-            try:
-                (lessons / f"{stem}.md").write_text(lesson_markdown(entry), encoding="utf-8")
-                for i, im in enumerate(render_lesson_pages(entry)):
-                    im.save(lessons / f"{stem}{'' if i == 0 else '-' + str(i + 1)}.png")
-                vault = getattr(args, "vault", None)
-                if vault:
-                    vault_note(vault, entry)
-                pending["push"] = True
-                print(f"📝 #{entry['n']} lesson saved: {lessons / (stem + '.md')}", flush=True)
-            except Exception as e:
-                print(f"⚠️  lesson files: {str(e)[:100]}", flush=True)
-
     def emit(entry):
+        """A lookup: shown on the web page and sent to the tablet's inbox (phrase or image, context, source);
+        the tablet asks Gemini, prints the lesson and adds it to the Vocabulary document."""
         with lock:
-            entry.setdefault("n", counter[0] + 1)
-            counter[0] = max(counter[0], entry["n"])
             entry["time"] = datetime.now().strftime("%H:%M:%S")
             events.append(entry)
             save_events()
         what = entry.get("text") or entry.get("image")
-        print(f"📖 #{entry['n']} {entry['kind']} in '{entry['doc']}'{' p.' + str(entry['page']) if entry.get('page') else ''}: {what}", flush=True)
-        if explain:
-            threading.Thread(target=explain_and_write, args=(entry,), daemon=True).start()
+        print(f"📖 {entry['kind']} in '{entry['doc']}'{' p.' + str(entry['page']) if entry.get('page') else ''}: {what}", flush=True)
+        name = f"{int(time.time() * 1000)}"
+        source = f"{entry['doc']}{' p.' + str(entry['page']) if entry.get('page') else ''}"
+        text = f"{entry.get('text', '')}\n{entry.get('context') or '-'}\n{source}\n"
+        if entry.get("image"):
+            subprocess.run(["scp", "-q"] + get_ssh_base_opts() + [str(out / entry["image"]), f"{host}:{TABLET_VOCAB_DIR}/inbox/{name}.png"], capture_output=True)
+        r = subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"mkdir -p {TABLET_VOCAB_DIR}/inbox && cat > {TABLET_VOCAB_DIR}/inbox/{name}.tmp && mv {TABLET_VOCAB_DIR}/inbox/{name}.tmp {TABLET_VOCAB_DIR}/inbox/{name}.txt"],
+                           input=text.encode("utf-8"), capture_output=True)
+        with lock:
+            entry["sent"] = r.returncode == 0
+            save_events()
+        if r.returncode:
+            print(f"⚠️  could not send it to the tablet: {r.stderr.decode()[:100]}", flush=True)
+
+    def mirror_lessons():
+        """Lessons the tablet made since last time: a markdown file each, the web page, the vault."""
+        listing = run_ssh(f"ls {TABLET_VOCAB_DIR}/lessons/*.txt 2>/dev/null; true", host=host).split()
+        for path in listing:
+            no = Path(path).name[:4]
+            if no in mirrored or not no.isdigit():
+                continue
+            raw = subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"cat {path}"], capture_output=True).stdout.decode("utf-8", "replace")
+            lines = raw.split("\n")
+            phrase = lines[0].strip()
+            context = lines[1].strip() if len(lines) > 1 else ""
+            source = lines[2].strip() if len(lines) > 2 else ""
+            full = "\n".join(lines[4:]).strip()
+            entry = {"n": int(no), "kind": "lesson", "doc": source, "text": phrase, "phrase": phrase, "context": "" if context == "-" else context,
+                     "full": full, "explanation": full, "time": datetime.now().strftime("%H:%M:%S")}
+            stem = f"{no}-" + re.sub(r"[^A-Za-z0-9]+", "-", phrase or "entry").strip("-")[:40]
+            (lessons / f"{stem}.md").write_text(lesson_markdown(entry), encoding="utf-8")
+            if vault:
+                vault_note(vault, entry)
+            with lock:
+                events.append(entry)
+                save_events()
+            mirrored.add(no)
+            print(f"📝 lesson {no} '{phrase}' from the tablet: {lessons / (stem + '.md')}", flush=True)
 
     def doc_info(uuid_):
         if uuid_ in docs:
@@ -3216,6 +3216,8 @@ def cmd_vocab(args):
         loop = pts[::max(1, len(pts) // 200)]
         content = [s for s in strokes if sum(1 for q in s if inside(q, loop)) >= 0.6 * len(s)]
         uuid_ = open_document(host)
+        if uuid_ == words_uuid:
+            return   # the Words page is the tablet's own business
         info = doc_info(uuid_) if uuid_ else {"title": "?", "pages": [], "pdf": None, "texts": {}}
         if not content:
             # a loop with no handwriting inside: on printed text the highlighter is the tool, since the tablet
@@ -3225,10 +3227,9 @@ def cmd_vocab(args):
             return
         for s in content:
             strokes.remove(s)
-        n = next_n()
-        image = f"ink-{n}.png"
+        image = f"ink-{int(time.time())}.png"
         render_strokes(content, box, out / image)
-        emit({"n": n, "kind": "ink", "doc": info["title"], "image": image, "box": [round(v) for v in box], "strokes": len(content)})
+        emit({"kind": "ink", "doc": info["title"], "image": image, "box": [round(v) for v in box], "strokes": len(content)})
 
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -3239,25 +3240,14 @@ def cmd_vocab(args):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     reader = PenReader(host, on_stroke)
     threading.Thread(target=reader.run, daemon=True).start()
-    print(f"🌐 http://localhost:{args.port}  —  highlight printed text or handwriting, or draw a loop around handwriting; lessons become pages of the Vocabulary document; Ctrl+C to stop", flush=True)
+    print(f"🌐 http://localhost:{args.port}  —  highlight printed text or handwriting, or draw a loop around handwriting; the tablet makes the lesson; Ctrl+C to stop", flush=True)
     last = None   # (page file, mtime) last parsed
     primed = set()
+    mirrored_at = 0
     try:
         while True:
             uuid_ = open_document(host)
-            if tablet and pending["push"] and not uuid_:   # new lesson pages, and nothing open on the tablet: rebuild the document now
-                try:
-                    pending["push"] = False
-                    n = len(list(lessons.glob("*.png")))
-                    push_vocab_document(host, lessons)
-                    pushed["pages"] = n
-                    pushed_file.write_text(json.dumps(pushed))
-                    print(f"📄 Vocabulary document rebuilt with {n} pages (the tablet reloaded once, on its home screen)", flush=True)
-                except Exception as e:
-                    pending["push"] = True
-                    print(f"⚠️  document push: {str(e)[:100]}", flush=True)
-                    time.sleep(30)
-            if uuid_:
+            if uuid_ and uuid_ != words_uuid:
                 try:
                     newest = run_ssh(f"cd {REMOTE_PATH}/{uuid_} 2>/dev/null && ls -t *.rm 2>/dev/null | head -n 1 | xargs -r stat -c '%Y %n'", host=host).split()
                 except RuntimeError:
@@ -3288,11 +3278,16 @@ def cmd_vocab(args):
                             emit({"kind": "highlight", "doc": info["title"], "page": index + 1 if index is not None else None, "page_id": page_id, "start": st,
                                   "text": tx, "context": sentence_around(page_text(info, index), tx)})
                         for key, box, under in fresh_ink:   # a highlighter over handwriting: the handwriting under it
-                            n = next_n()
-                            image = f"ink-{n}.png"
+                            image = f"ink-{int(time.time())}.png"
                             render_strokes(under, box, out / image)
-                            emit({"n": n, "kind": "ink", "doc": info["title"], "page": index + 1 if index is not None else None, "page_id": page_id,
+                            emit({"kind": "ink", "doc": info["title"], "page": index + 1 if index is not None else None, "page_id": page_id,
                                   "mark": list(key), "image": image, "box": [round(v) for v in box], "strokes": len(under)})
+            if time.time() - mirrored_at >= 10:
+                try:
+                    mirror_lessons()
+                except Exception as e:
+                    print(f"⚠️  lessons from the tablet: {str(e)[:80]}", flush=True)
+                mirrored_at = time.time()
             time.sleep(4)
     except KeyboardInterrupt:
         print("\nVocabulary watcher stopped.", flush=True)
@@ -3679,9 +3674,7 @@ def main():
     p_vocab.add_argument("--dir", type=str, default="vocab", help="Folder for the captured lookups and the web page (default ./vocab)")
     p_vocab.add_argument("--port", type=int, default=8765, help="Local web page port (default 8765)")
     p_vocab.add_argument("--vault", type=str, default=None, help="Also append every lesson to this markdown file (an Obsidian note); each lesson is always its own file under ./vocab/lessons")
-    p_vocab.add_argument("--no-explain", dest="explain", action="store_false", help="Only capture; no Gemini explanation (needs GEMINI_API_KEY)")
-    p_vocab.add_argument("--no-tablet", dest="tablet", action="store_false", help="Don't rebuild the Vocabulary document on the tablet (one printed page per lesson)")
-    p_vocab.add_argument("--install", action="store_true", help="Push the Vocabulary document (all lessons so far) into the app folder now")
+    p_vocab.add_argument("--install", action="store_true", help="Put the vocabulary program on the tablet first (the Words page, the Vocabulary document, the Gemini key, the lessons so far)")
     p_vocab.add_argument("--teacher", type=str, default=None, help="A text file with the teaching persona and method for the explanations (default ./vocab/teacher.md)")
     p_vocab.set_defaults(func=cmd_vocab)
 
