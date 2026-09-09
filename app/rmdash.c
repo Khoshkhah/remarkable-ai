@@ -630,7 +630,12 @@ static void update_text(const char *tname, const char *old, const char *new, int
 }
 
 static void update_zone(int z, const char *old, const char *new, int phase, struct tm *lt) {
-    if (z == 0) { update_text("clock", old, new, 0, phase); return; }
+    if (z == 0) {   /* the time is always taken out whole and written whole, never digit by digit (the user's choice) */
+        struct text *t = T("clock"); if (!t) return;
+        if (phase == 0 && old[0]) draw_text(t->size, t->x, t->y, old, 1);
+        if (phase == 1 && new[0]) draw_text(t->size, t->x, t->y, new, 0);
+        return;
+    }
     if (z >= 4 && z <= 6) {   /* a usage row: bar, percentage, reset day and time, each only if it changed */
         int i = z - 4; char ob[64], nb[64], name[20];
         snprintf(ob, sizeof ob, "%s", old); snprintf(nb, sizeof nb, "%s", new);
@@ -740,7 +745,8 @@ int main(int argc, char **argv) {
         if (drawn_total > 0 && m != checked_mtime && m >= cycle_end + 1) {
             checked_mtime = m;
             long live = live_strokes(rmfile);
-            if (live >= 0 && live < drawn_total - 1) { fprintf(stderr, "the page holds %ld strokes, we drew %ld: our ink is missing (eraser selected, or erased by hand)\n", live, drawn_total); resweep = 1; }
+            fprintf(stderr, "page saved: %ld strokes on it, %ld of ours expected\n", live, drawn_total);
+            if (live >= 0 && live < drawn_total - 1) { fprintf(stderr, "our ink is missing (eraser selected, or erased by hand): everything again\n"); resweep = 1; }
         }
         if (resweep) continue;
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
@@ -755,8 +761,8 @@ int main(int argc, char **argv) {
             update_zone(z, shown[z], want[z], 1, &lt);
             if (page_lost) break;
             strcpy(shown[z], want[z]);
-            fprintf(stderr, "%s: %s (%.0f s, %ld frames, %.1f ms/frame)\n", ZONES[z], want[z], (now_us() - t0) / 1e6, frames_written - f0,
-                    frames_written > f0 ? (now_us() - t0) / 1e3 / (frames_written - f0) : 0.0);
+            fprintf(stderr, "%s: %s (%.0f s, %ld frames, %.1f ms/frame; %ld strokes of ours on the page)\n", ZONES[z], want[z], (now_us() - t0) / 1e6, frames_written - f0,
+                    frames_written > f0 ? (now_us() - t0) / 1e3 / (frames_written - f0) : 0.0, drawn_total);
         }
         if (page_lost) continue;
         if (any) cycle_end = time(NULL);
