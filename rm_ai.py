@@ -2865,9 +2865,17 @@ def cmd_vocab(args):
     strokes = []    # real-pen strokes no loop has claimed yet
     pending = []    # loops around printed text, resolved once the page they were drawn on is saved
 
+    counter = [max((e.get("n", 0) for e in events), default=0)]
+
+    def next_n():
+        with lock:
+            counter[0] += 1
+            return counter[0]
+
     def emit(entry):
         with lock:
-            entry["n"] = len(events) + 1
+            entry.setdefault("n", counter[0] + 1)
+            counter[0] = max(counter[0], entry["n"])
             entry["time"] = datetime.now().strftime("%H:%M:%S")
             events.append(entry)
             events_file.write_text(json.dumps(events, indent=1, ensure_ascii=False))
@@ -2963,10 +2971,10 @@ def cmd_vocab(args):
             return
         for s in content:
             strokes.remove(s)
-        n = len(events) + 1
+        n = next_n()
         image = f"ink-{n}.png"
         render_strokes(content, box, out / image)
-        emit({"kind": "ink", "doc": info["title"], "image": image, "box": [round(v) for v in box], "strokes": len(content)})
+        emit({"n": n, "kind": "ink", "doc": info["title"], "image": image, "box": [round(v) for v in box], "strokes": len(content)})
 
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
