@@ -3119,7 +3119,8 @@ def vault_note(path, entry):
 
 VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabulary</title>
 <style>body{font:16px system-ui;margin:2em auto;max-width:56em;padding:0 1em} .e{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}
-.e img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em} .ctx{color:#444} .fa{direction:rtl;text-align:right;font-size:1.1em;line-height:1.7}</style>
+.e img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em} .ctx{color:#444}
+.lesson div{text-align:start;line-height:1.7;font-size:1.05em;unicode-bidi:plaintext} .fa{font-size:1.1em;text-align:start;unicode-bidi:plaintext}</style>
 <h1>reMarkable vocabulary <span id="n" class="meta"></span></h1><div id="list"></div>
 <script>let last='';async function poll(){
   try{ const r = await fetch('events.json?'+Date.now()); const ev = await r.json();
@@ -3130,7 +3131,7 @@ VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabular
         `<div class="e"><div class="meta">#${e.n} · ${e.time} · ${e.doc}${e.page ? ' p.'+e.page : ''} · ${e.kind}</div>
          ${e.text ? '<p><b>'+e.text+'</b></p>' : ''}${e.context ? '<p class="ctx">'+e.context+'</p>' : ''}
          ${e.image ? '<img src="'+e.image+'?'+Date.now()+'">' : ''}
-         ${e.read ? '<p><b>Read:</b> '+e.read+'</p>' : ''}${e.explanation ? '<div class="fa">'+e.explanation.replace(/\\n/g,'<br>')+'</div>' : ''}${e.farsi_line ? '<p class="fa"><b>'+e.farsi_line+'</b></p>' : ''}</div>`).join(''); }
+         ${e.read ? '<p><b>Read:</b> '+e.read+'</p>' : ''}${e.explanation ? '<div class="lesson">'+e.explanation.split(/\\n/).map(l => '<div dir="auto">'+(l.trim()||'&nbsp;')+'</div>').join('')+'</div>' : ''}${e.farsi_line ? '<p dir="auto" class="fa"><b>'+e.farsi_line+'</b></p>' : ''}</div>`).join(''); }
   } catch(e) {} setTimeout(poll, 2000); } poll();</script>
 """
 
