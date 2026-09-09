@@ -31,7 +31,8 @@ against a live tablet: `rm-ai devices` (connectivity), `rm-ai list` (read path),
 `.venv/bin/python rm_ai.py dashboard --mode standby` every 15 minutes from it.
 
 Implemented subcommands — **this is the authoritative list**: `devices`/`device`, `add-device`,
-`setup`/`setup-agent`/`install-skills`, `list`, `read`, `push`, `clock`, `draw`, `dashboard`/`dash`.
+`setup`/`setup-agent`/`install-skills`, `list`, `read`, `push`, `clock`, `draw`, `dashboard`/`dash`,
+`chat`, `vocab`.
 A global `--device/-d <id>` before the subcommand targets one tablet for a single invocation.
 
 ## Architecture
@@ -203,6 +204,26 @@ value or reset time changes; at midnight it re-pushes the template. Inputs: `fet
 list of the usage endpoint behind Claude Code's `/usage`, read with the token in
 `~/.claude/.credentials.json`), `fetch_claude_usage()` (Admin API, needs `ANTHROPIC_ADMIN_KEY`); the
 pure `summarize_*` reducers are the tested parts. `--mode live` hands off to `DigitalClock`.
+
+**Vocabulary** (`cmd_vocab`, English learning). A watcher on the PC: every 4 s it takes the open
+document's newest `.rm` (the page on screen is the one whose file changed last), parses it with rmscene
+for `SceneGlyphItemBlock`s (`read_highlights`: xochitl stores the highlighted *text* of PDF/EPUB pages,
+`GlyphRange.text`) and for highlighter strokes over handwriting (`read_marked_ink`, pen strokes mostly
+inside the highlighter stroke's box); `PenReader` (as in the chat) turns a loop around handwriting into
+an image at once. Marks on a page untouched for 10 min at first sight are old and skipped; seen ones are
+keyed by page and text/mark across restarts (`events.json`). Loops around printed text are deliberately
+not supported: the tablet's "best fit" zoom crops each page to its content, so printed positions are not
+derivable from the PDF (two highlight rectangles proved the fit varies per document). `explain_with_gemini`
+(google-genai, `gemini-flash-latest` with fallbacks and 503/429 retries; the PC's key from
+`GEMINI_API_KEY`) returns JSON: `full` (the lesson in the shape `vocab/teacher.md` dictates, Farsi-first,
+with a "connection to previous concepts" fed the last 12 phrases) plus a short card (`meaning`, `note`,
+`examples`, `farsi`, `farsi_meaning`). The card is baked into pen strokes (`vocab_entry_paths`: STROKE_FONT
+now has lower case and punctuation; Farsi via `farsi_strokes`, PIL+raqm shaping of DejaVu Sans, fill runs,
+`wrap_farsi`, right-aligned), a page wipe (10 px lanes) when it would not fit (`bake_vocab_item`, cursor in
+`vocab/page.json`), and queued on the tablet (`queue_to_tablet` → `/home/root/.local/share/rmvocab/queue`);
+`app/rmvocab.c` draws queued files in name order whenever the Vocabulary page is open and deletes them
+(`play_mixed`: each stroke with its own tool). `install_vocab_app` pushes the one-page document into the
+app folder and installs the `rmvocab` service. The full lesson goes to the web page and `vault_note`.
 
 ## Agent configuration lives in three places and is copied outward
 

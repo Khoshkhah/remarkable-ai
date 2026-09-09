@@ -2891,7 +2891,7 @@ DEFAULT_TEACHER = ("You are an experienced English teacher for adult Farsi speak
                    "or phrase as a patient tutor would, in simple English, with usage and two examples, and give the Farsi.")
 
 
-def explain_with_gemini(text=None, context=None, image_path=None, teacher=None):
+def explain_with_gemini(text=None, context=None, image_path=None, teacher=None, previous=None):
     """Simple-English meaning, a usage note, two examples and the Farsi of `text` (or of the handwriting
     in `image_path`, transcribed first), from Gemini with GEMINI_API_KEY. `teacher` is the persona and
     method (vocab/teacher.md by default: paste your own teaching instructions there). Returns a dict or {"error"}."""
@@ -2924,12 +2924,15 @@ def explain_with_gemini(text=None, context=None, image_path=None, teacher=None):
             text = read
         prompt = ((teacher or DEFAULT_TEACHER).strip() + "\n\nReply as JSON with these keys: "
                   "\"phrase\" (the word or phrase, corrected if misspelt), "
-                  "\"meaning\" (the simple-English meaning, one or two short sentences; add the part of speech and IPA in parentheses when useful), "
-                  "\"note\" (one or two short sentences: usage, a collocation, a synonym, a typical mistake), "
+                  "\"full\" (the complete lesson as plain text with line breaks, in the shape the instructions above describe), "
+                  "and, for a short card written by hand on a small e-ink page: "
+                  "\"meaning\" (the meaning in simple English, one or two short sentences, with the part of speech in parentheses), "
+                  "\"note\" (one short sentence: the most useful collocation or usage point), "
                   "\"examples\" (two short natural example sentences), "
                   "\"farsi\" (the Farsi translation of the phrase), "
                   "\"farsi_meaning\" (one short sentence in Farsi explaining it). "
-                  f"\nWord or phrase: {text!r}." + (f" It was read in this sentence: {context!r}." if context else ""))
+                  f"\nWord or phrase: {text!r}." + (f" It was read in this sentence: {context!r}." if context else "")
+                  + (f"\nWords learned earlier, for the connection section: {', '.join(previous)}." if previous else ""))
         out = json.loads(ask(prompt, response_mime_type="application/json").text)
         if image_path:
             out["read"] = text
@@ -3104,16 +3107,19 @@ def vault_note(path, entry):
         f.write(f"*{entry['time']}, {entry['doc']}{' p.' + str(entry['page']) if entry.get('page') else ''}*\n\n")
         if entry.get("context"):
             f.write(f"> {entry['context']}\n\n")
-        f.write(f"{entry.get('meaning', '')} {entry.get('note', '')}\n\n")
-        for ex in entry.get("examples") or []:
-            f.write(f"- {ex}\n")
-        if entry.get("farsi"):
-            f.write(f"\n**{entry['farsi']}** — {entry.get('farsi_meaning', '')}\n")
+        if entry.get("full"):
+            f.write(entry["full"].strip() + "\n")
+        else:
+            f.write(f"{entry.get('meaning', '')} {entry.get('note', '')}\n\n")
+            for ex in entry.get("examples") or []:
+                f.write(f"- {ex}\n")
+            if entry.get("farsi"):
+                f.write(f"\n**{entry['farsi']}** — {entry.get('farsi_meaning', '')}\n")
 
 
 VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabulary</title>
 <style>body{font:16px system-ui;margin:2em auto;max-width:56em;padding:0 1em} .e{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}
-.e img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em} .ctx{color:#444} .fa{direction:rtl;font-size:1.15em}</style>
+.e img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em} .ctx{color:#444} .fa{direction:rtl;text-align:right;font-size:1.1em;line-height:1.7}</style>
 <h1>reMarkable vocabulary <span id="n" class="meta"></span></h1><div id="list"></div>
 <script>let last='';async function poll(){
   try{ const r = await fetch('events.json?'+Date.now()); const ev = await r.json();
@@ -3124,7 +3130,7 @@ VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabular
         `<div class="e"><div class="meta">#${e.n} · ${e.time} · ${e.doc}${e.page ? ' p.'+e.page : ''} · ${e.kind}</div>
          ${e.text ? '<p><b>'+e.text+'</b></p>' : ''}${e.context ? '<p class="ctx">'+e.context+'</p>' : ''}
          ${e.image ? '<img src="'+e.image+'?'+Date.now()+'">' : ''}
-         ${e.read ? '<p><b>Read:</b> '+e.read+'</p>' : ''}${e.explanation ? '<p>'+e.explanation.replace(/\\n/g,'<br>')+'</p>' : ''}${e.farsi ? '<p class="fa">'+e.farsi+'</p>' : ''}</div>`).join(''); }
+         ${e.read ? '<p><b>Read:</b> '+e.read+'</p>' : ''}${e.explanation ? '<div class="fa">'+e.explanation.replace(/\\n/g,'<br>')+'</div>' : ''}${e.farsi_line ? '<p class="fa"><b>'+e.farsi_line+'</b></p>' : ''}</div>`).join(''); }
   } catch(e) {} setTimeout(poll, 2000); } poll();</script>
 """
 
@@ -3167,16 +3173,19 @@ def cmd_vocab(args):
         """In a worker thread: Gemini, the tablet's queue, the vault, the web page."""
         teacher_file = Path(getattr(args, "teacher", None) or out / "teacher.md")
         teacher = teacher_file.read_text() if teacher_file.exists() else None
-        r = explain_with_gemini(text=entry.get("text"), context=entry.get("context"), image_path=str(out / entry["image"]) if entry.get("image") else None, teacher=teacher)
+        with lock:
+            previous = [e["phrase"] for e in events if e.get("phrase") and e is not entry][-12:]
+        r = explain_with_gemini(text=entry.get("text"), context=entry.get("context"), image_path=str(out / entry["image"]) if entry.get("image") else None,
+                                teacher=teacher, previous=previous)
         with lock:
             if "error" in r:
                 entry["explanation"] = "⚠️ " + r["error"]
                 save_events()
                 print(f"⚠️  #{entry['n']}: {r['error']}", flush=True)
                 return
-            entry.update({k: r[k] for k in ("phrase", "meaning", "note", "examples", "farsi", "farsi_meaning", "read") if k in r})
-            entry["explanation"] = f"{r.get('meaning', '')}\n{r.get('note', '')}\n" + "\n".join("- " + e for e in r.get("examples") or [])
-            entry["farsi"] = f"{r.get('farsi', '')} — {r.get('farsi_meaning', '')}"
+            entry.update({k: r[k] for k in ("phrase", "meaning", "note", "examples", "farsi", "farsi_meaning", "read", "full") if k in r})
+            entry["explanation"] = r.get("full") or f"{r.get('meaning', '')}\n{r.get('note', '')}\n" + "\n".join("- " + e for e in r.get("examples") or [])
+            entry["farsi_line"] = f"{r.get('farsi', '')} — {r.get('farsi_meaning', '')}"
             save_events()
             print(f"💡 #{entry['n']} {r.get('phrase')}: {r.get('meaning', '')[:80]} | {r.get('farsi', '')}", flush=True)
             try:

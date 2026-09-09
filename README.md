@@ -273,6 +273,23 @@ The tablet keeps that token (root-only file) and renews it by itself; never run 
 that folder again, or the tablet's copy stops working. `rm-ai dashboard --uninstall` removes it;
 the log is `ssh root@<tablet> journalctl -u rmdash -f`.
 
+## Learning English on the tablet (`rm-ai vocab`)
+
+`rm-ai vocab` turns marks you make while reading into lessons. Highlight a word or a paragraph on a
+PDF or EPUB (the tablet stores the highlighted text itself, so it arrives exact, with the sentence
+around it), or highlight or loop a piece of handwriting in a notebook (it is read from the image).
+Each one goes to Gemini (`GEMINI_API_KEY`, free tier is enough) with the teaching method in
+`vocab/teacher.md`, a Farsi-first lesson in fixed sections: definition and meaning with the word's
+formation, structure and grammar with collocations, examples with translations, synonyms and
+antonyms, and a paragraph that connects the word to the ones learned before. The full lesson goes to
+a local web page (`http://localhost:8765`) and is appended to a markdown note (`--vault` for an
+Obsidian note; default `vocab/vocabulary.md`). A short card, meaning, note, two examples and the Farsi,
+is written by the tablet on a **Vocabulary** page in the app folder whenever that page is open
+(`rm-ai vocab --install` puts the page and its program there; English in the single-stroke font, Farsi
+from a Persian font, the page wiped when full). Loops around *printed* text are not used: the tablet's
+best-fit zoom crops pages to their content, so printed positions cannot be read off the PDF; the
+highlighter is the tool there.
+
 ### Clock that runs on the tablet itself (`rm-ai clock --install`)
 
 `rm-ai clock --install` puts the clock on the tablet, so it needs no PC afterwards: whenever you
