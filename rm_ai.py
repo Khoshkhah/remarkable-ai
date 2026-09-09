@@ -2887,7 +2887,6 @@ def cmd_vocab(args):
     seen = {(e["page_id"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
     seen_marks = {(e["page_id"], tuple(e["mark"])) for e in events if e.get("kind") == "ink" and "mark" in e}
     strokes = []    # real-pen strokes no loop has claimed yet
-    pending = []    # loops around printed text, resolved once the page they were drawn on is saved
 
     counter = [max((e.get("n", 0) for e in events), default=0)]
 
@@ -2935,46 +2934,7 @@ def cmd_vocab(args):
                 info["texts"][index] = ""
         return info["texts"][index]
 
-    def pdf_words_in(info, index, box):
-        """The PDF page's printed words whose position falls inside `box` (display px). Where the tablet
-        puts the page: measured against highlight rectangles on an rM2, the crop box is scaled to the
-        screen width less 145 px of margin each side (or to the height less 5 px, whichever is smaller),
-        centred horizontally and top-aligned 5 px down; a character is ~0.40 of the font size wide."""
-        if info["pdf"] is None or index is None:
-            return ""
-        try:
-            import logging
-            logging.getLogger("pypdf").setLevel(logging.ERROR)
-            from pypdf import PdfReader
-            page = PdfReader(str(info["pdf"])).pages[index]
-            cx0, cy0, cx1, cy1 = [float(v) for v in page.cropbox]
-            W, H = cx1 - cx0, cy1 - cy0
-            s = min((1404 - 2 * 145) / W, (1872 - 10) / H)
-            dx, dy = (1404 - W * s) / 2, 5
-            chunks = []   # (x px, y px, char width px, text) of every text run; a run is usually a line
-            def visit(text, cm, tm, fd, fs):
-                if text.strip():
-                    x = cm[0] * tm[4] + cm[2] * tm[5] + cm[4] - cx0
-                    y = cm[1] * tm[4] + cm[3] * tm[5] + cm[5] - cy0
-                    size = abs(tm[0] * cm[0]) * fs if fs else 10   # the font size in page points
-                    chunks.append((dx + x * s, dy + (H - y) * s, size * 0.40 * s, text))
-            page.extract_text(visitor_text=visit)
-        except Exception:
-            return ""
-        x0, y0, x1, y1 = box
-        hit = []
-        for x, y, cw, text in sorted(chunks, key=lambda c: (c[1], c[0])):
-            if not (y0 - 6 <= y <= y1 + 6):
-                continue
-            pos = 0   # words along the run, at their estimated place
-            for word in text.split(" "):
-                wx = x + (pos + len(word) / 2) * cw
-                if word.strip() and x0 - 10 <= wx <= x1 + 10:
-                    hit.append(word.strip())
-                pos += len(word) + 1
-        return " ".join(hit)
-
-    def on_stroke(pts):   # the pen: a loop around handwriting, or around printed text on a PDF, is a lookup
+    def on_stroke(pts):   # the pen: a loop around handwriting is a lookup (printed text: use the highlighter)
         if not is_box(pts):
             strokes.append(pts)
             del strokes[:-400]
@@ -2986,12 +2946,10 @@ def cmd_vocab(args):
         uuid_ = open_document(host)
         info = doc_info(uuid_) if uuid_ else {"title": "?", "pages": [], "pdf": None, "texts": {}}
         if not content:
-            if info["pdf"] is None:
-                return
-            # printed text: which page is on screen is only known once the tablet saves the loop (10-60 s);
-            # the poll loop resolves it against the page file saved after the loop was drawn
-            pending.append({"uuid": uuid_, "box": box, "at": time.time()})
-            print(f"▢ loop on printed text of '{info['title']}' (box {[round(v) for v in box]}), waiting for the tablet to save the page...", flush=True)
+            # a loop with no handwriting inside: on printed text the highlighter is the tool, since the tablet
+            # stores the highlighted text itself, while where a printed word sits on screen depends on the
+            # tablet's own page fit ("best fit" crops the page to its content) and cannot be read off the PDF
+            print(f"▢ loop with no handwriting inside on '{info['title']}' (box {[round(v) for v in box]}): for printed text use the highlighter", flush=True)
             return
         for s in content:
             strokes.remove(s)
@@ -3009,7 +2967,7 @@ def cmd_vocab(args):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     reader = PenReader(host, on_stroke)
     threading.Thread(target=reader.run, daemon=True).start()
-    print(f"🌐 http://localhost:{args.port}  —  highlight a word or a paragraph on a PDF, or draw a loop around handwriting; Ctrl+C to stop", flush=True)
+    print(f"🌐 http://localhost:{args.port}  —  highlight printed text or handwriting, or draw a loop around handwriting; Ctrl+C to stop", flush=True)
     last = None   # (page file, mtime) last parsed
     primed = set()
     try:
@@ -3020,19 +2978,6 @@ def cmd_vocab(args):
                     newest = run_ssh(f"cd {REMOTE_PATH}/{uuid_} 2>/dev/null && ls -t *.rm 2>/dev/null | head -n 1 | xargs -r stat -c '%Y %n'", host=host).split()
                 except RuntimeError:
                     newest = []
-                if len(newest) == 2 and pending and int(newest[0]) >= int(pending[0]["at"]) - 1:   # the page saved after the loop
-                    page_id = newest[1][:-3]
-                    info = doc_info(uuid_)
-                    index = info["pages"].index(page_id) if page_id in info["pages"] else None
-                    for p in [p for p in pending if p["uuid"] == uuid_]:
-                        pending.remove(p)
-                        text = pdf_words_in(info, index, p["box"])
-                        if text:
-                            emit({"kind": "selection", "doc": info["title"], "page": index + 1 if index is not None else None, "text": text, "box": [round(v) for v in p["box"]]})
-                        else:
-                            print(f"▢ nothing readable inside the loop on page {index + 1 if index is not None else '?'} (box {[round(v) for v in p['box']]})", flush=True)
-                if pending and time.time() - pending[0]["at"] > 120:
-                    pending.pop(0)
                 if len(newest) == 2 and (newest[1], newest[0]) != last:
                     last = (newest[1], newest[0])
                     page_id = newest[1][:-3]
