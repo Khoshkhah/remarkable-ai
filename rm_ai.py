@@ -2815,6 +2815,29 @@ def read_highlights(raw):
     return out
 
 
+def read_marked_ink(raw):
+    """Handwriting under highlighter strokes in a .rm v6 page: for each highlighter stroke, the box it
+    covers (display px) and the pen strokes mostly inside that box. A highlighter over printed text
+    becomes a text highlight instead (read_highlights); over handwriting it is a stroke like any other."""
+    import io
+    from rmscene import read_blocks, SceneLineItemBlock
+    from rmscene.scene_items import Pen
+    items = [b.item.value for b in read_blocks(io.BytesIO(raw))
+             if isinstance(b, SceneLineItemBlock) and b.item.value is not None and getattr(b.item.value, "points", None)]
+    strokes = [([(p.x + 702, p.y) for p in it.points], it.tool) for it in items]
+    ink = [pts for pts, tool in strokes if tool not in (Pen.HIGHLIGHTER_1, Pen.HIGHLIGHTER_2, Pen.ERASER, Pen.ERASER_AREA)]
+    out = []
+    for pts, tool in strokes:
+        if tool not in (Pen.HIGHLIGHTER_1, Pen.HIGHLIGHTER_2):
+            continue
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        box = (min(xs) - 15, min(ys) - 15, max(xs) + 15, max(ys) + 15)
+        under = [s for s in ink if sum(1 for x, y in s if box[0] <= x <= box[2] and box[1] <= y <= box[3]) >= 0.5 * len(s)]
+        if under:
+            out.append(((round(pts[0][0]), round(pts[0][1])), box, under))
+    return out
+
+
 def sentence_around(page_text, phrase):
     """The sentence of `page_text` that contains `phrase` (or its first words), for context; '' if not found."""
     text = " ".join(page_text.split())
@@ -2862,6 +2885,7 @@ def cmd_vocab(args):
     lock = threading.Lock()
     docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
     seen = {(e["page_id"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
+    seen_marks = {(e["page_id"], tuple(e["mark"])) for e in events if e.get("kind") == "ink" and "mark" in e}
     strokes = []    # real-pen strokes no loop has claimed yet
     pending = []    # loops around printed text, resolved once the page they were drawn on is saved
 
@@ -3015,22 +3039,31 @@ def cmd_vocab(args):
                     raw = subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"cat {REMOTE_PATH}/{uuid_}/{newest[1]}"], capture_output=True).stdout
                     try:
                         marks = read_highlights(raw)
+                        inked = read_marked_ink(raw)
                     except Exception as e:
-                        marks = []
-                        print(f"⚠️  could not read the page's highlights: {str(e)[:80]}", flush=True)
+                        marks, inked = [], []
+                        print(f"⚠️  could not read the page: {str(e)[:80]}", flush=True)
                     info = doc_info(uuid_)
                     index = info["pages"].index(page_id) if page_id in info["pages"] else None
                     fresh = [(page_id, st, tx) for st, tx in marks if (page_id, tx) not in seen]
                     seen.update((page_id, tx) for _, _, tx in fresh)
-                    if page_id not in primed and time.time() - int(newest[0]) > 600:   # a page untouched for 10 min: its highlights are old
+                    fresh_ink = [(key, box, under) for key, box, under in inked if (page_id, key) not in seen_marks]
+                    seen_marks.update((page_id, key) for key, _, _ in fresh_ink)
+                    if page_id not in primed and time.time() - int(newest[0]) > 600:   # a page untouched for 10 min: its marks are old
                         primed.add(page_id)
-                        if fresh:
-                            print(f"· '{info['title']}' page {index + 1 if index is not None else '?'}: {len(fresh)} earlier highlight(s) skipped", flush=True)
+                        if fresh or fresh_ink:
+                            print(f"· '{info['title']}' page {index + 1 if index is not None else '?'}: {len(fresh) + len(fresh_ink)} earlier mark(s) skipped", flush=True)
                     else:
                         primed.add(page_id)
                         for _, st, tx in fresh:
                             emit({"kind": "highlight", "doc": info["title"], "page": index + 1 if index is not None else None, "page_id": page_id, "start": st,
                                   "text": tx, "context": sentence_around(page_text(info, index), tx)})
+                        for key, box, under in fresh_ink:   # a highlighter over handwriting: the handwriting under it
+                            n = next_n()
+                            image = f"ink-{n}.png"
+                            render_strokes(under, box, out / image)
+                            emit({"n": n, "kind": "ink", "doc": info["title"], "page": index + 1 if index is not None else None, "page_id": page_id,
+                                  "mark": list(key), "image": image, "box": [round(v) for v in box], "strokes": len(under)})
             time.sleep(4)
     except KeyboardInterrupt:
         print("\nVocabulary watcher stopped.", flush=True)
