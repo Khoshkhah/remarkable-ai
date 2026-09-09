@@ -2904,9 +2904,10 @@ def cmd_vocab(args):
         return info["texts"][index]
 
     def pdf_words_in(info, index, box):
-        """The PDF page's printed words whose position falls inside `box` (display px). The tablet shows
-        the page's crop box fitted and centred on the screen; the small correction was measured against a
-        highlight's rectangle on an rM2 (text baselines sit ~29 px above where the plain fit puts them)."""
+        """The PDF page's printed words whose position falls inside `box` (display px). Where the tablet
+        puts the page: measured against highlight rectangles on an rM2, the crop box is scaled to the
+        screen width less 145 px of margin each side (or to the height less 5 px, whichever is smaller),
+        centred horizontally and top-aligned 5 px down; a character is ~0.40 of the font size wide."""
         if info["pdf"] is None or index is None:
             return ""
         try:
@@ -2916,15 +2917,15 @@ def cmd_vocab(args):
             page = PdfReader(str(info["pdf"])).pages[index]
             cx0, cy0, cx1, cy1 = [float(v) for v in page.cropbox]
             W, H = cx1 - cx0, cy1 - cy0
-            s = min(1404 / W, 1872 / H)
-            dx, dy = (1404 - W * s) / 2 + 20, (1872 - H * s) / 2 - 29
+            s = min((1404 - 2 * 145) / W, (1872 - 10) / H)
+            dx, dy = (1404 - W * s) / 2, 5
             chunks = []   # (x px, y px, char width px, text) of every text run; a run is usually a line
             def visit(text, cm, tm, fd, fs):
                 if text.strip():
                     x = cm[0] * tm[4] + cm[2] * tm[5] + cm[4] - cx0
                     y = cm[1] * tm[4] + cm[3] * tm[5] + cm[5] - cy0
                     size = abs(tm[0] * cm[0]) * fs if fs else 10   # the font size in page points
-                    chunks.append((dx + x * s, dy + (H - y) * s, size * 0.5 * s, text))
+                    chunks.append((dx + x * s, dy + (H - y) * s, size * 0.40 * s, text))
             page.extract_text(visitor_text=visit)
         except Exception:
             return ""
