@@ -282,11 +282,11 @@ Each one goes to Gemini (`GEMINI_API_KEY`, free tier is enough) with the teachin
 `vocab/teacher.md`, a Farsi-first lesson in fixed sections: definition and meaning with the word's
 formation, structure and grammar with collocations, examples with translations, synonyms and
 antonyms, and a paragraph that connects the word to the ones learned before. The full lesson goes to
-a local web page (`http://localhost:8765`) and is appended to a markdown note (`--vault` for an
-Obsidian note; default `vocab/vocabulary.md`). A short card, meaning, note, two examples and the Farsi,
-is written by the tablet on a **Vocabulary** page in the app folder whenever that page is open
-(`rm-ai vocab --install` puts the page and its program there; English in the single-stroke font, Farsi
-from a Persian font, the page wiped when full). Loops around *printed* text are not used: the tablet's
+a local web page (`http://localhost:8765`), to one markdown file per lesson in `vocab/lessons/`
+(`--vault <file>` also appends it to an Obsidian note), and to the tablet: each lesson is printed as a
+page (Farsi right-to-left, English left-to-right) and the **Vocabulary** document in the app folder is
+rebuilt from all lesson pages the next time nothing is open on the tablet (one reload; handwriting on
+those pages is dropped by a rebuild). `rm-ai vocab --install` pushes the document right away. Loops around *printed* text are not used: the tablet's
 best-fit zoom crops pages to their content, so printed positions cannot be read off the PDF; the
 highlighter is the tool there.
 

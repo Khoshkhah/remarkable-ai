@@ -2965,7 +2965,7 @@ def render_lesson_pages(entry):
     W, H, L, R, TOP, BOTTOM = 1404, 1872, 80, 1324, 90, 1790
     fonts = {k: ImageFont.truetype(LESSON_FONT["bold" if k in ("title", "head") else "regular"], v) for k, v in (("title", 60), ("head", 34), ("body", 30), ("meta", 22))}
     text = (entry.get("full") or entry.get("explanation") or "").replace("**", "")
-    text = re.sub(r"^\s*[\U0001F300-\U0001FAFF\u2600-\u27BF\u2700-\u27BF]\s*", "", text, flags=re.M)   # emoji tofu off the headings
+    text = re.sub(r"^\s*[\U0001F300-\U0001FAFF\u2600-\u27BF\u2700-\u27BF][\uFE0E\uFE0F\u200D]*\s*", "", text, flags=re.M)   # the emoji and its variation selector off the headings (DejaVu shows the selector as a dotted circle)
     heads = ("Definition & Meaning", "Structure & Grammar", "Examples & Translations", "Synonyms & Antonyms", "Connection to Previous")
 
     def rtl(line):

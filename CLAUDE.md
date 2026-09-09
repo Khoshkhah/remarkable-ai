@@ -217,13 +217,17 @@ derivable from the PDF (two highlight rectangles proved the fit varies per docum
 (google-genai, `gemini-flash-latest` with fallbacks and 503/429 retries; the PC's key from
 `GEMINI_API_KEY`) returns JSON: `full` (the lesson in the shape `vocab/teacher.md` dictates, Farsi-first,
 with a "connection to previous concepts" fed the last 12 phrases) plus a short card (`meaning`, `note`,
-`examples`, `farsi`, `farsi_meaning`). The card is baked into pen strokes (`vocab_entry_paths`: STROKE_FONT
-now has lower case and punctuation; Farsi via `farsi_strokes`, PIL+raqm shaping of DejaVu Sans, fill runs,
-`wrap_farsi`, right-aligned), a page wipe (10 px lanes) when it would not fit (`bake_vocab_item`, cursor in
-`vocab/page.json`), and queued on the tablet (`queue_to_tablet` → `/home/root/.local/share/rmvocab/queue`);
-`app/rmvocab.c` draws queued files in name order whenever the Vocabulary page is open and deletes them
-(`play_mixed`: each stroke with its own tool). `install_vocab_app` pushes the one-page document into the
-app folder and installs the `rmvocab` service. The full lesson goes to the web page and `vault_note`.
+`examples`, `farsi`, `farsi_meaning`) for the web page. Every lesson is one markdown file
+(`lesson_markdown`, `vocab/lessons/<NNNN>-<phrase>.md`, front matter phrase/source/page/date) and one or
+more printed 1404×1872 page images next to it (`render_lesson_pages`: DejaVu via `LESSON_FONT`, each line
+in its own direction, Farsi lines shaped with raqm, right-to-left and right-aligned, English left-to-right,
+headings bold, the heading emoji and its variation selector stripped). `vocab_document_pdf` joins all
+`lessons/*.png` into one PDF and `push_vocab_document` pushes it as the **Vocabulary** document of the app
+folder (`cmd_push` with `rebuild=True`: a fresh `.content`, so xochitl regenerates the page list, and
+`fresh=True`: the `.rm` pen layer is dropped, so notes written on lesson pages do not survive a rebuild).
+The watcher rebuilds only while `open_document(host)` is empty (nothing open on the tablet: the push
+restarts xochitl) and remembers the pushed page count in `vocab/pushed.json`; `--install` pushes now,
+`--no-tablet` never. The full lesson also goes to the web page and, with `--vault`, to `vault_note`.
 
 ## Agent configuration lives in three places and is copied outward
 
