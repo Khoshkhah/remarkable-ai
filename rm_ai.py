@@ -2894,6 +2894,8 @@ def cmd_vocab(args):
             return ""
         if index not in info["texts"]:
             try:
+                import logging
+                logging.getLogger("pypdf").setLevel(logging.ERROR)   # font-encoding notes are not lookups
                 from pypdf import PdfReader
                 info["texts"][index] = PdfReader(str(info["pdf"])).pages[index].extract_text() or ""
             except Exception:
@@ -2953,11 +2955,12 @@ def cmd_vocab(args):
                     index = info["pages"].index(page_id) if page_id in info["pages"] else None
                     fresh = [(page_id, st, tx) for st, tx in marks if (page_id, st, tx) not in seen]
                     seen.update(fresh)
-                    if page_id not in primed:   # highlights made before the watcher started are not lookups
+                    if page_id not in primed and time.time() - int(newest[0]) > 600:   # a page untouched for 10 min: its highlights are old
                         primed.add(page_id)
                         if fresh:
                             print(f"· '{info['title']}' page {index + 1 if index is not None else '?'}: {len(fresh)} earlier highlight(s) skipped", flush=True)
                     else:
+                        primed.add(page_id)
                         for _, st, tx in fresh:
                             emit({"kind": "highlight", "doc": info["title"], "page": index + 1 if index is not None else None,
                                   "text": tx, "context": sentence_around(page_text(info, index), tx)})
