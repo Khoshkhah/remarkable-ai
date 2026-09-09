@@ -13,4 +13,4 @@ Modes:
 - `--mode doc`: pushes the page as a document you can write on (restarts the tablet's app).
 - `--mode doc --live`: pushes the page once, then keeps drawing HH:MM every minute and the usage rows on it with the pen; `--no-push` reuses the open page.
 - `--restore`: factory sleep screen back.
-- `--install`: put the dashboard on the tablet itself (Dashboard page in the app folder; time, date, calendar, weather and usage drawn by the tablet, no PC); `--token-file` for a tablet-own Claude login; `--uninstall` removes it.
+- `--install`: put the dashboard on the tablet itself, no PC needed afterwards: a Dashboard page in the app folder (time and usage by the pen, date/calendar/weather printed by the tablet) and the sleep screen painted by the tablet every 5 minutes; `--no-push` reuses the page; `--token-file` for a tablet-own Claude login (default `~/.claude-tablet/.credentials.json`); `--uninstall` removes it.

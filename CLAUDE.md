@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-module Python CLI (`rm_ai.py`, ~2500 lines) that drives a reMarkable tablet over local
+A single-module Python CLI (`rm_ai.py`, ~3400 lines) plus three C files in `app/` for the tablet that drives a reMarkable tablet over local
 Wi-Fi SSH: reads handwritten pages, renders them to PNG, pushes documents, injects live stylus
 strokes, and paints an e-ink dashboard onto the sleep screen. There is no package directory —
 `pyproject.toml` declares `py-modules = ["rm_ai"]` with entry points `rm-ai` / `rm_ai` → `rm_ai:main`
@@ -123,8 +123,10 @@ moved there by editing its `.metadata` parent); `bake_clock_app()` records every
 (the tablet runs on UTC) and the static ARMv7 binary `app/rmclock` to `/home/root/.local/share/rmclock`
 with a systemd unit `rmclock.service`. `app/rmclock.c` replays the blobs with the same pacing constants
 (keep them in sync with `VirtualStylus` by hand), yields to the real pen by reading the digitizer
-back and filtering its own echo, and stops if the page's `.rm` has not been autosaved for 3 awake
-minutes (strokes not landing = page not on screen). **Before every stroke** `page_on_screen()` in
+back and filtering its own echo, and draws everything again when the page's `.rm` has not been
+autosaved for 3 awake minutes, shrank to a fraction (`ink_wiped`, "Erase all") or did not keep its
+size after a cycle (`ink_none`: the eraser is the selected tool, pen strokes erase); a closed page
+left with the eraser selected gets the pen back (`give_back_the_pen`). **Before every stroke** `page_on_screen()` in
 `stylus.h` requires two things: `LastOpen` in `xochitl.conf` names the document (xochitl clears it
 to `@ByteArray()` on the home screen) *and* xochitl's journal says the document's worker is running
 (`worker on <uuid> now running` / `now exiting`, tailed with `journalctl -u xochitl -f`; a
@@ -149,31 +151,41 @@ the standby template with `stamp=True` (header text, weather values, usage rows 
 left blank) for the same days as `sleep/YYYY-MM-DD.rle` (`rle_encode`, value/count triples), and
 `bake_font_atlases()` ships glyph bitmaps of `SLEEP_FONTS` (`f<size><b|r>.atlas`, PIL placement: left,
 top, advance per glyph); rmdash's `compose_sleep()` loads the day's background, stamps the live values in
-the standby layout (`stamp_text`, coverage blend), and writes `/usr/share/remarkable/suspended.png` with
-its own PNG writer (stored deflate blocks, no zlib on the tablet) after every fetch, at most every 15 min;
-the standby cron then only tops the stocks up (`dash_app.sleep`). `TABLET_DASH_LAYOUT` is the single source of the
-pen-owned zones (clock and the three usage rows, erased whole when a value in them changes), text
-origins and bars, written to the tablet as `layout`; rmdash draws only zones whose sweep file exists.
-Glyphs are single strokes: `STROKE_FONT` is a designed plotter-style font (lines and arcs on a 100-unit
-em, cap height 72, y down; `_arc()` angles are clockwise on screen, 90 = bottom) that `stroke_glyph()`
-centres in the page font's advance width, so a thick pen (the Marker) draws a bold digit in a second;
-`bake_dash_app()` records them at `GLYPH_BASE` with advance widths in `glyphs`, each with an eraser twin
-(`e<size>_<code>`, `ebar<i>`: `erase_paths()`, three eraser passes along the stroke, 6 px apart, run 3 px
-past the ends) that rmdash uses to take a zone's old content out along its own strokes (`draw_zone(...,
-eraser=1)`); zone sweeps (`SWEEP_LANE` 6 px) are only for a page whose content is unknown. Measured: the
-app removes a point of a stroke only when the eraser passes within about (17 − width/2) px of its
-centreline, so 14 px lanes left slivers of 27 px ballpoint strokes between the lanes. Data:
-Open-Meteo directly (also while idle, for the printed block), Claude usage either from a `token` file
-(a Claude Code login made for the tablet in another `CLAUDE_CONFIG_DIR`; the program renews it with
-`refresh_claude_token`'s request, and a login cannot be shared: renewal invalidates the other holder at
-once) or from the `usage` file the PC's standby run writes (`feed_dash_usage`, `dash_app.feed` in the
-config). HTTPS is the tablet's `openssl s_client -ign_eof` with HTTP/1.0 (no chunking); JSON is scanned,
-not parsed. `state` remembers what is drawn against the page's `.rm` mtime so reopening an unchanged
-page draws nothing; `ink_wiped`/`ink_none`/`ink_lost` (stylus.h) notice an erased page, strokes that
-leave no ink (eraser selected) and no autosave at all, and make the program draw everything again;
-`give_back_the_pen()` rewrites `"LastActiveTool": "eraser"` to `"primary"` in the document's `.content`
-while it is closed. `RM_FIXTURES=<dir>` makes it read `usage.json`/`weather.json`/`token.json` instead of
-the network and skip the xochitl restart for dry runs.
+the standby layout plus an "AS OF" clock (`stamp_text`, coverage blend), and writes
+`/usr/share/remarkable/suspended.png` with its own PNG writer (a fixed-Huffman deflate with run matches:
+the root filesystem has ~10 MB free) after every fetch, at most every 5 min; the standby cron then only
+tops the stocks up (`dash_app.sleep`).
+`TABLET_DASH_LAYOUT` is the single source of the pen-owned zones (clock and the three usage rows; the
+rows' reset times are pen-drawn too, 40 px), text origins and bars, written to the tablet as `layout`;
+rmdash draws only zones whose sweep file exists. Glyphs are single strokes: `STROKE_FONT` is a designed
+plotter-style font (lines and arcs on a 100-unit em, cap height 72, y down; `_arc()` angles are clockwise
+on screen, 90 = bottom) that `stroke_glyph()` centres in the page font's advance width, so a thick pen
+(the Marker) draws a bold digit in a second; `bake_dash_app()` records them at `GLYPH_BASE` with advance
+widths in `glyphs`, each with an eraser twin (`e<size>_<code>`, `ebar<i>`: `erase_path()`, one
+continuous eraser stroke zigzagging along the glyph's strokes at `ERASE_OFFSETS` ±12 px, sampled every
+`ERASE_STEP_PX` 4 px, run 6 px past the ends). Measured: the app removes a point of a stroke only when
+an eraser *sample* falls within a few px of the stroke's centreline (less for wide strokes: 16 px steps
+left pieces of the Calligraphy pen's 50 px strokes, 14 px sweep lanes left slivers of a 27 px ballpoint),
+so sweeps (`SWEEP_LANE` 6 px) are only for a page whose content is unknown. Updates (`update_zone`): the
+time is always erased whole and rewritten whole each minute (the user's choice: a digit-by-digit update
+cannot cope with a partly erased time), rows only where a field changed, all erasing first, then
+`CYCLE_SETTLE_US` (1 s) in the air, then drawing. Data: Open-Meteo directly (in both the idle and the
+active branch: the printed page and the sleep screen need it), Claude usage every 5 min either from a
+`token` file (a Claude Code login made for the tablet in another `CLAUDE_CONFIG_DIR`; the program renews
+it with `refresh_claude_token`'s request, and a login cannot be shared: renewal invalidates the other
+holder at once; the token endpoint pretty-prints, so the JSON scanner skips blanks after a key) or from
+the `usage` file the PC's standby run writes (`feed_dash_usage`, `dash_app.feed`). HTTPS is the tablet's
+`openssl s_client -ign_eof` with HTTP/1.0 (no chunking). `state` remembers what is drawn (and
+`strokes=`, the pen strokes drawn) against the page's `.rm` mtime so reopening an unchanged page draws
+nothing. Ink checks: `drawn_total` counts every pen stroke drawn or erased (`blob_strokes()` per glyph
+file); after each save later than the last cycle, `live_strokes()` (stylus.h, a minimal `.rm` v6 block
+walk counting SceneLineItem blocks that still carry a value, verified against rmscene) is compared with
+it and fewer strokes mean `resweep`: sweep every zone, `START_SETTLE`, draw everything (covers "Erase
+all", a partial erase by hand, and pen strokes that erase because the eraser is the selected tool);
+`ink_lost` (no autosave for 3 awake min) does the same. `give_back_the_pen()` rewrites
+`"LastActiveTool": "eraser"` to `"primary"` in the document's `.content` while it is closed.
+`RM_FIXTURES=<dir>` makes it read `usage.json`/`weather.json`/`token.json` instead of the network and skip
+the xochitl restart for dry runs (`rmdash <dir> [xochitl.conf] [event device]`).
 
 **Dashboard** (`render_dashboard_image` → `cmd_dashboard`): PIL renders a 1404×1872 grayscale
 image locally. `--mode standby` scp's it to `/usr/share/remarkable/suspended.png`, backing the factory

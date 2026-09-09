@@ -14,7 +14,7 @@ Connect your reMarkable tablets wirelessly to **Claude, Gemini, and ChatGPT** ov
 - **Multi-Model Vision**: Works seamlessly with Anthropic Claude 3.7/3.5 Sonnet, Google Gemini 2.5/2.0, and OpenAI GPT-4o.
 - **Claude Code Slash Commands**: Use `/rm-read`, `/rm-tasks`, and `/rm-list` directly inside Claude Code.
 - **Antigravity / Gemini Skills**: Native Agent Skill ready for autonomous agent execution.
-- **Live e-ink dashboard and clock**: a sleep-screen dashboard with weather and Claude usage, and a clock drawn on the open page with the tablet's own pen.
+- **Live e-ink dashboard and clock**: a sleep-screen dashboard with weather and Claude usage, and a clock drawn on the open page with the tablet's own pen. Both also run **on the tablet itself** (`--install`), with no PC: the clock and a dashboard page in the tablet's app folder, plus the sleep screen painted by the tablet.
 
 ## Quickstart Installation
 
@@ -182,7 +182,8 @@ rm-ai draw box --at 400,500 --size 300,200
 
 ## Dashboard
 
-Three ways to put a dashboard on the tablet, all rendered by the PC from the same template
+Four ways to put a dashboard on the tablet; the first three are rendered by the PC from the same
+template, the fourth runs on the tablet itself (see below)
 (date, month calendar with today marked, weather, Claude usage, battery, priorities):
 
 - **Sleep screen** (`rm-ai dashboard`, the default `--mode standby`): the image becomes the tablet's
@@ -235,25 +236,33 @@ page must stay open and the tablet awake.
 ### Dashboard that runs on the tablet itself (`rm-ai dashboard --install`)
 
 `rm-ai dashboard --install` pushes the dashboard page into the tablet's **app** folder and installs a
-small program that keeps it current whenever the page is open, with no PC: the time every minute and
-the three Claude usage rows, drawn with the pen as single-line digits in the page's own font (select
-the **Marker** on that page; a thick pen makes them bold). Date, calendar and the weather block are
-printed: the installer leaves the next 60 days of page templates on the tablet, the tablet fetches
-the weather from Open-Meteo itself, composes each day's page with the weather block in the sleep
-screen's format and swaps it in between documents (one reload of the tablet's app per day, and when
-the printed weather is more than six hours old). The sleep screen is the tablet's too: it stamps
-the weather, the usage rows, its battery and the time onto the day's background (a stock of those is
-on board as well) and writes the sleep image itself every 15 minutes, no reload needed. The PC's
-dashboard cron then only tops the stocks up when it happens to run. Reopening an unchanged page continues where it left off, a page you
-wrote on is cleaned zone by zone first, a page you erased is drawn again, and a page left with the
-eraser selected gets the pen back before its next open. Both tablet programs draw only while the
-tablet's own app reports the page open in its editor, checked before every stroke, so nothing is ever
-drawn on another page.
+small program that keeps it current whenever the page is open, with no PC at all:
+
+- **Time**: every minute the whole time is erased and written again with the pen, in single-stroke
+  digits of the page's own font (a thick pen such as the **Marker** makes them bold; any pen works).
+- **Claude usage rows**: bar, percentage and reset time, refreshed every 5 minutes with the tablet's
+  own Claude login (below); only what changed is redrawn.
+- **Date and calendar**: printed. The installer leaves the next 60 days of page templates on the
+  tablet; the tablet fetches the weather from Open-Meteo itself, composes each day's page with the
+  weather block in the sleep screen's format and swaps it in between documents (one reload of the
+  tablet's app per day, or when the printed weather is over six hours old).
+- **Sleep screen**: the tablet stamps the weather, the usage rows, its battery and the time onto the
+  day's background and writes the sleep image itself every 5 minutes; "AS OF" next to the date tells
+  you when. No reload, no PC. The PC's dashboard cron only tops the stocks up when it happens to run.
+
+It keeps itself honest: erasing runs along the exact strokes it drew (one zigzag eraser stroke per
+glyph, five passes), after every save it counts the live strokes in the page file against what it
+drew and cleans and redraws everything when strokes are missing (an "Erase all", a partial erase by
+hand, or the eraser left as the selected tool, in which case pen strokes erase), and a page closed
+with the eraser selected gets the pen back before its next open. Both tablet programs draw only
+while the tablet's own app reports the page open in its editor, checked before every stroke, so
+nothing is ever drawn on another page. Both are system services: a restart of the tablet brings them
+back, a firmware update removes them (run the two `--install` commands again).
 
 Claude usage needs a login. A login cannot be shared: renewing it from a second device logs the
 first one out at once (measured). Without a tablet login the usage rows are fed by this PC's
 dashboard cron every 15 minutes. To make the tablet fetch them itself, give it a login of its own,
-made by Claude Code itself:
+made by Claude Code itself, on the PC:
 
 ```bash
 CLAUDE_CONFIG_DIR=~/.claude-tablet claude      # log in with your Claude account, then /exit
@@ -275,9 +284,10 @@ the folder if it exists elsewhere. The tablet shows this PC's local time. `rm-ai
 `ssh root@<tablet> journalctl -u rmclock -f`.
 
 How it works: every stroke of the clock is pre-baked on the PC into raw input events (`app/`
-holds the 46 KB C replayer, built for ARMv7 with `app/build.sh` and Docker) and installed as a
-systemd service that watches which document is open and keeps checking that its strokes land in
-that page's file.
+holds the two C programs, `rmclock` 50 KB and `rmdash` 83 KB, built for ARMv7 with `app/build.sh`
+and Docker) and installed as a systemd service that watches which document is open and keeps
+checking that its strokes land in that page's file. Like the dashboard, it draws everything again
+after an "Erase all" and keeps retrying when its strokes leave no ink.
 
 ## How the virtual pen works
 
