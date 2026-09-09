@@ -60,14 +60,19 @@ static double text_width(int size, const char *s) {
     return w;
 }
 
+static long drawn_total = 0;   /* pen strokes of ours that should be on the page; checked against the page file */
+
 /* draw `s` in the baked glyphs of `size` with its text origin at (x, y) display px; with `eraser` the
  * glyphs' eraser twins run along the same strokes and take the text out again */
 static void draw_text(int size, double x, int y, const char *s, int eraser) {
     int i; for (i = 0; i < ngl && gl[i].size != size; i++);
     if (i == ngl) { fprintf(stderr, "no glyphs of size %d\n", size); return; }
-    char name[32];
+    char name[32], gname[32];
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p != ' ') { snprintf(name, sizeof name, "%c%d_%d.bin", eraser ? 'e' : 'g', size, *p); stroke_file(name, eraser, (int)lround(x) - base_x, y - base_y, -1); }
+        if (*p != ' ') {
+            snprintf(name, sizeof name, "%c%d_%d.bin", eraser ? 'e' : 'g', size, *p); snprintf(gname, sizeof gname, "g%d_%d.bin", size, *p);
+            if (stroke_file(name, eraser, (int)lround(x) - base_x, y - base_y, -1)) drawn_total += eraser ? -blob_strokes(gname) : blob_strokes(gname);
+        }
         x += gl[i].adv[*p];
     }
 }
@@ -283,7 +288,7 @@ static void draw_zone(int z, const char *want, struct tm *lt, int eraser) {
         int i = z - 4; char *p = strtok(buf, "|"); if (!p) return;
         int pct = atoi(p); char *dow = strtok(NULL, "|"), *hm = strtok(NULL, "|");
         char name[20], s[8]; snprintf(name, sizeof name, "%sbar%d.bin", eraser ? "e" : "", i);
-        if (pct > 0) stroke_file(name, eraser, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100 + (eraser ? 8 : 0));
+        if (pct > 0 && stroke_file(name, eraser, 0, 0, bars[i].x0 + (bars[i].x1 - bars[i].x0) * (pct > 100 ? 100 : pct) / 100 + (eraser ? 8 : 0))) drawn_total += eraser ? -1 : 1;
         snprintf(s, sizeof s, "%d", pct); snprintf(name, sizeof name, "pct%d", i); draw_at(name, s, 0, eraser);
         snprintf(name, sizeof name, "reset%d", i);
         struct text *rt = T(name);
@@ -634,8 +639,8 @@ static void update_zone(int z, const char *old, const char *new, int phase, stru
         int opct = op ? atoi(op) : -1, npct = np ? atoi(np) : -1;
         if (opct != npct) {
             int span = bars[i].x1 - bars[i].x0;
-            if (phase == 0 && opct > 0) { snprintf(name, sizeof name, "ebar%d.bin", i); stroke_file(name, 1, 0, 0, bars[i].x0 + span * (opct > 100 ? 100 : opct) / 100 + 8); }
-            if (phase == 1 && npct > 0) { snprintf(name, sizeof name, "bar%d.bin", i); stroke_file(name, 0, 0, 0, bars[i].x0 + span * (npct > 100 ? 100 : npct) / 100); }
+            if (phase == 0 && opct > 0) { snprintf(name, sizeof name, "ebar%d.bin", i); if (stroke_file(name, 1, 0, 0, bars[i].x0 + span * (opct > 100 ? 100 : opct) / 100 + 8)) drawn_total--; }
+            if (phase == 1 && npct > 0) { snprintf(name, sizeof name, "bar%d.bin", i); if (stroke_file(name, 0, 0, 0, bars[i].x0 + span * (npct > 100 ? 100 : npct) / 100)) drawn_total++; }
             if (page_lost) return;
         }
         snprintf(name, sizeof name, "pct%d", i); update_text(name, op, np, 0, phase);
@@ -653,7 +658,7 @@ static void update_zone(int z, const char *old, const char *new, int phase, stru
 static void save_state(char shown[NZ][512], long rm_mtime) {
     char path[600]; snprintf(path, sizeof path, "%s/state", dir);
     FILE *f = fopen(path, "w"); if (!f) return;
-    fprintf(f, "rm=%ld\n", rm_mtime);
+    fprintf(f, "rm=%ld\nstrokes=%ld\n", rm_mtime, drawn_total);
     for (int z = 0; z < NZ; z++) fprintf(f, "zone_%s=%s\n", ZONES[z], shown[z]);
     fclose(f);
 }
@@ -678,8 +683,9 @@ int main(int argc, char **argv) {
     journal_start(doc);
     static char shown[NZ][512], want[NZ][512];
     char state_path[600]; snprintf(state_path, sizeof state_path, "%s/state", dir);
-    int active = 0, lost = 0, sleep_due = 0;
-    time_t fetched = 0, slept = 0;
+    int active = 0, lost = 0, sleep_due = 0, resweep = 0;
+    time_t fetched = 0, slept = 0, cycle_end = 0;
+    long checked_mtime = 0;
     struct ink ink = {0};
     while (1) {
         if (page_lost) {                                    /* stopped mid-draw: forget what is drawn, erase everything next time */
@@ -710,19 +716,33 @@ int main(int argc, char **argv) {
             if (!open_device()) { sleep(5); continue; }
             char saved[32]; int same = read_kv("state", "rm", saved, sizeof saved) && atol(saved) == mtime(rmfile) && atol(saved) != 0;
             for (int z = 0; z < NZ; z++) { char k[24]; snprintf(k, sizeof k, "zone_%s", ZONES[z]); if (!same || !read_kv("state", k, shown[z], 512)) shown[z][0] = 0; }
+            drawn_total = same && read_kv("state", "strokes", saved, sizeof saved) ? atol(saved) : 0;
             if (!same && mtime(rmfile) == 0) fprintf(stderr, "fresh page, nothing to erase\n");   /* a pushed page has no strokes yet */
-            else if (!same) {                               /* the page changed since we last drew: clean every zone */
-                fprintf(stderr, "page changed since last time, erasing all zones\n");
-                char name[32];
-                for (int z = 0; z < NZ; z++) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); }
-                hover(START_SETTLE_US);
-            } else fprintf(stderr, "page unchanged since last time, keeping what is drawn\n");
+            else if (!same) resweep = 1;                    /* the page changed since we last drew: clean every zone */
+            else fprintf(stderr, "page unchanged since last time, keeping what is drawn\n");
             active = 1;
             ink_reset(&ink, rmfile);
             if (page_lost) continue;
         }
-        if (ink_lost(&ink) || ink_none(&ink) || ink_wiped(&ink)) { for (int z = 0; z < NZ; z++) shown[z][0] = 0; unlink(state_path); }
-        ink_begin(&ink);
+        if (resweep) {
+            fprintf(stderr, "erasing all zones, then drawing everything\n");
+            char name[32];
+            for (int z = 0; z < NZ; z++) { snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]); stroke_file(name, 1, 0, 0, -1); if (page_lost) break; }
+            if (page_lost) continue;
+            hover(START_SETTLE_US);
+            for (int z = 0; z < NZ; z++) shown[z][0] = 0;
+            drawn_total = 0; unlink(state_path); resweep = 0;
+        }
+        if (ink_lost(&ink)) resweep = 1;
+        /* the page file, once saved after our last cycle, must hold at least the strokes we drew; fewer means
+         * they left no ink (the eraser was the selected tool) or someone erased them: everything again */
+        long m = mtime(rmfile);
+        if (drawn_total > 0 && m != checked_mtime && m >= cycle_end + 1) {
+            checked_mtime = m;
+            long live = live_strokes(rmfile);
+            if (live >= 0 && live < drawn_total - 1) { fprintf(stderr, "the page holds %ld strokes, we drew %ld: our ink is missing (eraser selected, or erased by hand)\n", live, drawn_total); resweep = 1; }
+        }
+        if (resweep) continue;
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
         int changed[NZ], any = 0, erased = 0;
@@ -739,7 +759,7 @@ int main(int argc, char **argv) {
                     frames_written > f0 ? (now_us() - t0) / 1e3 / (frames_written - f0) : 0.0);
         }
         if (page_lost) continue;
-        if (any) ink_drawn(&ink);
+        if (any) cycle_end = time(NULL);
         if (time(NULL) - fetched >= minutes * 60) {        /* network only after drawing; what changed is drawn next round */
             long long t0 = now_us();
             fetch_weather();   /* the printed page and the sleep screen need it whether or not the pen draws it */

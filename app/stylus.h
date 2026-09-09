@@ -334,6 +334,44 @@ static int ink_lost(struct ink *w) {
     return 1;
 }
 
+/* live strokes in a .rm v6 page file: SceneLineItem blocks (type 5) that still carry a value (erased
+ * ones stay as tombstones). Verified against the rmscene reader on saved pages. -1 if unreadable. */
+static int rm_skip_tag(const unsigned char **b, const unsigned char *e, unsigned char tag, int kind) {   /* kind 0: id, 1: u32 */
+    if (*b >= e || **b != tag) return 0;
+    (*b)++;
+    if (kind == 1) { *b += 4; return *b <= e; }
+    (*b)++;                                   /* id part 1 */
+    while (*b < e && (**b & 0x80)) (*b)++;    /* varuint */
+    (*b)++;
+    return *b <= e;
+}
+static long live_strokes(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) return -1;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    unsigned char *buf = malloc(n > 0 ? n : 1); if (n <= 0 || fread(buf, 1, n, f) != (size_t)n) { fclose(f); free(buf); return n == 0 ? 0 : -1; }
+    fclose(f);
+    long count = 0, p = 43;
+    while (p + 8 <= n) {
+        unsigned long len = buf[p] | buf[p + 1] << 8 | buf[p + 2] << 16 | (unsigned long)buf[p + 3] << 24;
+        int type = buf[p + 7];
+        const unsigned char *b = buf + p + 8, *e = b + len;
+        if (e > buf + n) break;
+        if (type == 5 && rm_skip_tag(&b, e, 0x1F, 0) && rm_skip_tag(&b, e, 0x2F, 0) && rm_skip_tag(&b, e, 0x3F, 0) && rm_skip_tag(&b, e, 0x4F, 0) && rm_skip_tag(&b, e, 0x54, 1) && b < e && *b == 0x6C) count++;
+        p += 8 + len;
+    }
+    free(buf);
+    return count;
+}
+
+/* pen strokes a baked blob holds (tool-in events of the pen) */
+static int blob_strokes(const char *name) {
+    size_t len; unsigned char *blob = load(name, &len); if (!blob) return 0;
+    const struct ev *ev = (const struct ev *)blob; int n = 0;
+    for (size_t i = 0; i < len / sizeof *ev; i++) if (ev[i].type == EV_KEY && ev[i].code == BTN_TOOL_PEN && ev[i].value == 1) n++;
+    free(blob);
+    return n;
+}
+
 static void parse_dev_args(int argc, char **argv) {   /* [xochitl.conf] [event device] for dry runs off the tablet */
     if (argc > 2) CONF = argv[2];
     if (argc > 3) DEV = argv[3];
