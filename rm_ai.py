@@ -2861,7 +2861,7 @@ def cmd_vocab(args):
     events = json.loads(events_file.read_text()) if events_file.exists() else []
     lock = threading.Lock()
     docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
-    seen = set()    # (page id, start, text) of highlights already known
+    seen = {(e["page_id"], e["start"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
     strokes = []    # real-pen strokes no loop has claimed yet
 
     def emit(entry):
@@ -2962,7 +2962,7 @@ def cmd_vocab(args):
                     else:
                         primed.add(page_id)
                         for _, st, tx in fresh:
-                            emit({"kind": "highlight", "doc": info["title"], "page": index + 1 if index is not None else None,
+                            emit({"kind": "highlight", "doc": info["title"], "page": index + 1 if index is not None else None, "page_id": page_id, "start": st,
                                   "text": tx, "context": sentence_around(page_text(info, index), tx)})
             time.sleep(4)
     except KeyboardInterrupt:
