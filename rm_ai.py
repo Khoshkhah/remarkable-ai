@@ -2863,6 +2863,7 @@ def cmd_vocab(args):
     docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
     seen = {(e["page_id"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
     strokes = []    # real-pen strokes no loop has claimed yet
+    pending = []    # loops around printed text, resolved once the page they were drawn on is saved
 
     def emit(entry):
         with lock:
@@ -2917,18 +2918,28 @@ def cmd_vocab(args):
             W, H = cx1 - cx0, cy1 - cy0
             s = min(1404 / W, 1872 / H)
             dx, dy = (1404 - W * s) / 2 + 20, (1872 - H * s) / 2 - 29
-            chunks = []
+            chunks = []   # (x px, y px, char width px, text) of every text run; a run is usually a line
             def visit(text, cm, tm, fd, fs):
                 if text.strip():
                     x = cm[0] * tm[4] + cm[2] * tm[5] + cm[4] - cx0
                     y = cm[1] * tm[4] + cm[3] * tm[5] + cm[5] - cy0
-                    chunks.append((dx + x * s, dy + (H - y) * s, " ".join(text.split())))
+                    size = abs(tm[0] * cm[0]) * fs if fs else 10   # the font size in page points
+                    chunks.append((dx + x * s, dy + (H - y) * s, size * 0.5 * s, text))
             page.extract_text(visitor_text=visit)
         except Exception:
             return ""
         x0, y0, x1, y1 = box
-        hit = [(y, x, t) for x, y, t in chunks if x0 - 15 <= x <= x1 and y0 - 6 <= y <= y1 + 6]
-        return " ".join(t for _, _, t in sorted(hit))
+        hit = []
+        for x, y, cw, text in sorted(chunks, key=lambda c: (c[1], c[0])):
+            if not (y0 - 6 <= y <= y1 + 6):
+                continue
+            pos = 0   # words along the run, at their estimated place
+            for word in text.split(" "):
+                wx = x + (pos + len(word) / 2) * cw
+                if word.strip() and x0 - 10 <= wx <= x1 + 10:
+                    hit.append(word.strip())
+                pos += len(word) + 1
+        return " ".join(hit)
 
     def on_stroke(pts):   # the pen: a loop around handwriting, or around printed text on a PDF, is a lookup
         if not is_box(pts):
@@ -2944,16 +2955,10 @@ def cmd_vocab(args):
         if not content:
             if info["pdf"] is None:
                 return
-            try:   # the page on screen: the one whose file changed last
-                newest = run_ssh(f"cd {REMOTE_PATH}/{uuid_} 2>/dev/null && ls -t *.rm 2>/dev/null | head -n 1", host=host).strip()
-                index = info["pages"].index(newest[:-3]) if newest[:-3] in info["pages"] else None
-            except (RuntimeError, ValueError):
-                index = None
-            text = pdf_words_in(info, index, box)
-            if not text:
-                print(f"▢ loop on '{info['title']}' with nothing readable inside (box {[round(v) for v in box]})", flush=True)
-                return
-            emit({"kind": "selection", "doc": info["title"], "page": index + 1 if index is not None else None, "text": text, "box": [round(v) for v in box]})
+            # printed text: which page is on screen is only known once the tablet saves the loop (10-60 s);
+            # the poll loop resolves it against the page file saved after the loop was drawn
+            pending.append({"uuid": uuid_, "box": box, "at": time.time()})
+            print(f"▢ loop on printed text of '{info['title']}' (box {[round(v) for v in box]}), waiting for the tablet to save the page...", flush=True)
             return
         for s in content:
             strokes.remove(s)
@@ -2982,6 +2987,19 @@ def cmd_vocab(args):
                     newest = run_ssh(f"cd {REMOTE_PATH}/{uuid_} 2>/dev/null && ls -t *.rm 2>/dev/null | head -n 1 | xargs -r stat -c '%Y %n'", host=host).split()
                 except RuntimeError:
                     newest = []
+                if len(newest) == 2 and pending and int(newest[0]) >= int(pending[0]["at"]) - 1:   # the page saved after the loop
+                    page_id = newest[1][:-3]
+                    info = doc_info(uuid_)
+                    index = info["pages"].index(page_id) if page_id in info["pages"] else None
+                    for p in [p for p in pending if p["uuid"] == uuid_]:
+                        pending.remove(p)
+                        text = pdf_words_in(info, index, p["box"])
+                        if text:
+                            emit({"kind": "selection", "doc": info["title"], "page": index + 1 if index is not None else None, "text": text, "box": [round(v) for v in p["box"]]})
+                        else:
+                            print(f"▢ nothing readable inside the loop on page {index + 1 if index is not None else '?'} (box {[round(v) for v in p['box']]})", flush=True)
+                if pending and time.time() - pending[0]["at"] > 120:
+                    pending.pop(0)
                 if len(newest) == 2 and (newest[1], newest[0]) != last:
                     last = (newest[1], newest[0])
                     page_id = newest[1][:-3]
