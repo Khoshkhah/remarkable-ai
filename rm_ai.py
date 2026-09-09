@@ -2861,7 +2861,7 @@ def cmd_vocab(args):
     events = json.loads(events_file.read_text()) if events_file.exists() else []
     lock = threading.Lock()
     docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
-    seen = {(e["page_id"], e["start"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
+    seen = {(e["page_id"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
     strokes = []    # real-pen strokes no loop has claimed yet
 
     def emit(entry):
@@ -2953,8 +2953,8 @@ def cmd_vocab(args):
                         print(f"⚠️  could not read the page's highlights: {str(e)[:80]}", flush=True)
                     info = doc_info(uuid_)
                     index = info["pages"].index(page_id) if page_id in info["pages"] else None
-                    fresh = [(page_id, st, tx) for st, tx in marks if (page_id, st, tx) not in seen]
-                    seen.update(fresh)
+                    fresh = [(page_id, st, tx) for st, tx in marks if (page_id, tx) not in seen]
+                    seen.update((page_id, tx) for _, _, tx in fresh)
                     if page_id not in primed and time.time() - int(newest[0]) > 600:   # a page untouched for 10 min: its highlights are old
                         primed.add(page_id)
                         if fresh:
