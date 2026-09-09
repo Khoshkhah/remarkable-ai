@@ -471,7 +471,7 @@ static int build_pdf(const char *out) {   /* every lesson page, in order, as one
     pos += fprintf(o, "] >> endobj\n");
     for (int i = 0; i < n; i++) {
         int b = 3 + 3 * i; char cs[100]; int cl = snprintf(cs, sizeof cs, "q %.2f 0 0 %.2f 0 0 cm /Im Do Q", PW * PTS, PH * PTS);
-        off[b] = pos; pos += fprintf(o, "%d 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /XObject << /Im %d 0 R >> >> >> endobj\n", b, PW * PTS, PH * PTS, b + 1, b + 2);
+        off[b] = pos; pos += fprintf(o, "%d 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /ProcSet [ /PDF /ImageB ] /XObject << /Im %d 0 R >> >> >> endobj\n", b, PW * PTS, PH * PTS, b + 1, b + 2);
         off[b + 1] = pos; pos += fprintf(o, "%d 0 obj << /Length %d >> stream\n%s\nendstream endobj\n", b + 1, cl, cs);
         char path[700]; snprintf(path, sizeof path, "%s/%s", lessons_dir, pages[i]);
         size_t zl; char *z = slurp(path, &zl);

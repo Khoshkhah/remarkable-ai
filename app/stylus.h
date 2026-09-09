@@ -232,14 +232,23 @@ static int page_on_screen(void) {
     return doc_running && doc_open(watched_doc);
 }
 
-static int home_screen(void) {   /* no document open: LastOpen=@ByteArray() */
+#define HOME_QUIET_S 180   /* a restart of xochitl waits this long after the last document was closed */
+static long mtime(const char *path);
+/* No document open (LastOpen=@ByteArray()), and for a while: xochitl rewrites its config when a document
+ * opens or closes, so the config's age is the time since the last close. A `systemctl restart xochitl`
+ * right after a document closed found xochitl still busy with it once and made it crash on the way down
+ * (SIGSEGV), and a crashed xochitl reboots the whole tablet (remarkable-fail.service). So our restarts
+ * (a rebuilt document, a swapped page) wait until the home screen has been quiet for HOME_QUIET_S. */
+static int home_screen(void) {
     FILE *f = fopen(CONF, "r");
     if (!f) return 0;
     char line[512]; int home = 0;
     while (fgets(line, sizeof line, f))
         if (!strncmp(line, "LastOpen=", 9)) { home = strstr(line, "()") != NULL; break; }
     fclose(f);
-    return home;
+    if (!home) return 0;
+    if (getenv("RM_FIXTURES")) return 1;
+    return time(NULL) - mtime(CONF) >= HOME_QUIET_S;
 }
 
 static int doc_open(const char *doc) {   /* xochitl keeps the open document's uuid in its config, empty on the home screen */
