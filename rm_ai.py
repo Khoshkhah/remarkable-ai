@@ -1749,6 +1749,40 @@ STROKE_FONT = {   # glyph: (width, strokes)
     "X": (52, [[(4, 0), (48, 72)], [(48, 0), (4, 72)]]),
     "Y": (52, [[(2, 0), (26, 38), (50, 0)], [(26, 38), (26, 72)]]),
     "Z": (50, [[(4, 0), (46, 0), (4, 72), (46, 72)]]),
+    # lower case: x-height 52 (y 20..72), ascenders to 0, descenders to 92
+    "a": (46, [_arc(23, 48, 18, 24, 0, 360), [(41, 24), (41, 72)]]),
+    "b": (46, [[(6, 0), (6, 72)], _arc(24, 48, 18, 24, 180, 540)]),
+    "c": (42, [_arc(22, 48, 17, 24, 320, 40)]),
+    "d": (46, [[(40, 0), (40, 72)], _arc(22, 48, 18, 24, 0, 360)]),
+    "e": (44, [[(5, 48), (39, 48)] + _arc(22, 48, 17, 24, 0, -250)]),
+    "f": (30, [_arc(28, 12, 12, 12, 270, 180) + [(16, 72)], [(4, 24), (28, 24)]]),
+    "g": (46, [_arc(22, 46, 18, 22, 0, 360), [(40, 24), (40, 74)] + _arc(22, 74, 18, 18, 0, 160)]),
+    "h": (46, [[(6, 0), (6, 72)], _arc(24, 44, 18, 20, 180, 360) + [(42, 72)]]),
+    "i": (18, [[(9, 24), (9, 72)], _arc(9, 8, 2, 2, 0, 360)]),
+    "j": (22, [[(13, 24), (13, 76)] + _arc(3, 76, 10, 14, 0, 100), _arc(13, 8, 2, 2, 0, 360)]),
+    "k": (42, [[(6, 0), (6, 72)], [(36, 24), (6, 52)], [(16, 43), (38, 72)]]),
+    "l": (18, [[(9, 0), (9, 72)]]),
+    "m": (66, [[(6, 72), (6, 24)], _arc(20, 40, 14, 16, 180, 360) + [(34, 72)], _arc(48, 40, 14, 16, 180, 360) + [(62, 72)]]),
+    "n": (46, [[(6, 72), (6, 24)], _arc(24, 44, 18, 20, 180, 360) + [(42, 72)]]),
+    "o": (46, [_arc(23, 48, 18, 24, 270, 630)]),
+    "p": (46, [[(6, 24), (6, 92)], _arc(24, 48, 18, 24, 180, 540)]),
+    "q": (46, [[(40, 24), (40, 92)], _arc(22, 48, 18, 24, 0, 360)]),
+    "r": (30, [[(6, 72), (6, 24)], _arc(22, 40, 16, 16, 180, 300)]),
+    "s": (40, [_arc(20, 36, 12, 12, 330, 90) + _arc(20, 60, 12, 12, 270, 510)]),
+    "t": (30, [[(14, 4), (14, 60)] + _arc(24, 60, 10, 12, 180, 90), [(4, 24), (26, 24)]]),
+    "u": (46, [[(6, 24), (6, 52)] + _arc(24, 52, 18, 20, 180, 0), [(42, 24), (42, 72)]]),
+    "v": (44, [[(4, 24), (22, 72), (40, 24)]]),
+    "w": (62, [[(4, 24), (17, 72), (31, 34), (45, 72), (58, 24)]]),
+    "x": (42, [[(5, 24), (37, 72)], [(37, 24), (5, 72)]]),
+    "y": (44, [[(4, 24), (22, 72)], [(40, 24), (16, 92)]]),
+    "z": (40, [[(5, 24), (35, 24), (5, 72), (35, 72)]]),
+    "'": (16, [[(8, 0), (8, 16)]]),
+    "\"": (26, [[(8, 0), (8, 16)], [(18, 0), (18, 16)]]),
+    "?": (40, [_arc(20, 18, 14, 16, 200, 360) + [(20, 48), (20, 56)], _arc(20, 70, 2, 2, 0, 360)]),
+    "!": (20, [[(10, 0), (10, 52)], _arc(10, 70, 2, 2, 0, 360)]),
+    "(": (26, [_arc(36, 40, 26, 46, 130, 230)]),
+    ")": (26, [_arc(-10, 40, 26, 46, 50, -50)]),
+    ";": (24, [_arc(12, 26, 2, 2, 0, 360), [(13, 66), (9, 78)]]),
 }
 
 
@@ -2853,6 +2887,230 @@ def sentence_around(page_text, phrase):
     return text[start:end].strip()
 
 
+DEFAULT_TEACHER = ("You are an experienced English teacher for adult Farsi speakers at an intermediate level. Explain the word "
+                   "or phrase as a patient tutor would, in simple English, with usage and two examples, and give the Farsi.")
+
+
+def explain_with_gemini(text=None, context=None, image_path=None, teacher=None):
+    """Simple-English meaning, a usage note, two examples and the Farsi of `text` (or of the handwriting
+    in `image_path`, transcribed first), from Gemini with GEMINI_API_KEY. `teacher` is the persona and
+    method (vocab/teacher.md by default: paste your own teaching instructions there). Returns a dict or {"error"}."""
+    import os
+    key = os.getenv("GEMINI_API_KEY") or load_config().get("gemini_api_key")
+    if not key:
+        return {"error": "no GEMINI_API_KEY (export it, or rm-ai setup --gemini-key)"}
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=key)
+        models = ("gemini-flash-latest", "gemini-3.5-flash", "gemini-flash-lite-latest")   # the alias first; the free tier answers 503 under load
+
+        def ask(contents, **cfg):
+            last = None
+            for model in models:
+                for attempt in range(2):
+                    try:
+                        return client.models.generate_content(model=model, contents=contents, config=types.GenerateContentConfig(**cfg))
+                    except Exception as e:
+                        last = e
+                        if "503" not in str(e) and "429" not in str(e):
+                            raise
+                        time.sleep(2)
+            raise last
+
+        if image_path:
+            from PIL import Image
+            read = ask([Image.open(image_path), "Transcribe the handwritten English in this image exactly, nothing else."]).text.strip()
+            text = read
+        prompt = ((teacher or DEFAULT_TEACHER).strip() + "\n\nReply as JSON with these keys: "
+                  "\"phrase\" (the word or phrase, corrected if misspelt), "
+                  "\"meaning\" (the simple-English meaning, one or two short sentences; add the part of speech and IPA in parentheses when useful), "
+                  "\"note\" (one or two short sentences: usage, a collocation, a synonym, a typical mistake), "
+                  "\"examples\" (two short natural example sentences), "
+                  "\"farsi\" (the Farsi translation of the phrase), "
+                  "\"farsi_meaning\" (one short sentence in Farsi explaining it). "
+                  f"\nWord or phrase: {text!r}." + (f" It was read in this sentence: {context!r}." if context else ""))
+        out = json.loads(ask(prompt, response_mime_type="application/json").text)
+        if image_path:
+            out["read"] = text
+        return out
+    except Exception as e:
+        return {"error": str(e)[:160]}
+
+
+TABLET_VOCAB_DIR = "/home/root/.local/share/rmvocab"
+VOCAB_LAYOUT = {"left": 80, "right": 1324, "top": 130, "bottom": 1780, "phrase": 56, "text": 40, "farsi": 56, "gap": 14}
+FARSI_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"   # has the Persian letters; PIL's raqm shapes and orders them
+
+
+def farsi_strokes(text, size, x_right, y, pitch=4):
+    """Pen strokes filling `text` rendered right-to-left with a Persian-capable font, its right edge at
+    `x_right`: like text_strokes(), one horizontal run per dark span every `pitch` rows."""
+    from PIL import Image, ImageDraw, ImageFont
+    font = ImageFont.truetype(FARSI_FONT, size)
+    w = int(font.getlength(text, direction="rtl", language="fa")) + 4
+    h = int(size * 1.5)
+    img = Image.new("L", (w, h), 255)
+    ImageDraw.Draw(img).text((2, 0), text, font=font, fill=0, direction="rtl", language="fa")
+    px = img.load()
+    x0 = x_right - w
+    strokes = []
+    for yy in range(0, h, pitch):
+        run = None
+        for xx in range(w):
+            dark = px[xx, yy] < 128
+            if dark and run is None:
+                run = xx
+            elif not dark and run is not None:
+                if xx - run >= 2:
+                    strokes.append([(x0 + run, y + yy), (x0 + xx - 1, y + yy)])
+                run = None
+    return strokes, w
+
+
+def wrap_farsi(text, size, width):
+    """Lines of Farsi `text` that fit `width` px, measured shaped; each line is drawn right-aligned."""
+    from PIL import ImageFont
+    if not text:
+        return []
+    font = ImageFont.truetype(FARSI_FONT, size)
+    lines, line = [], ""
+    for word in text.split():
+        trial = (line + " " + word).strip()
+        if line and font.getlength(trial, direction="rtl", language="fa") > width:
+            lines.append(line)
+            line = word
+        else:
+            line = trial
+    return lines + ([line] if line else [])
+
+
+def wrap_stroke_text(text, size, width):
+    """Lines of `text` in the single-stroke font that fit `width` px (page-font advances)."""
+    font = get_font(size, bold=True)
+    lines, line = [], ""
+    for word in text.split():
+        trial = (line + " " + word).strip()
+        if line and font.getlength(trial) > width:
+            lines.append(line)
+            line = word
+        else:
+            line = trial
+    return lines + ([line] if line else [])
+
+
+def vocab_entry_paths(entry, y):
+    """Pen paths (display px) of one explanation laid out from `y` down: the phrase, its meaning and
+    note, two examples, the Farsi line(s). Returns (pen paths, next y)."""
+    L = VOCAB_LAYOUT
+    paths = []
+    font_cache = {}
+
+    def line(text, size, yy):
+        font = font_cache.setdefault(size, get_font(size, bold=True))
+        x = L["left"]
+        for ch in text:
+            adv = font.getlength(ch)
+            for p in stroke_glyph(ch, size, adv):
+                paths.append([(x + px, yy + py) for px, py in p])
+            x += adv
+        return yy + int(size * 1.25)
+
+    y = line(entry.get("phrase") or entry.get("text") or "?", L["phrase"], y) + L["gap"]
+    for key in ("meaning", "note"):
+        for ln in wrap_stroke_text(entry.get(key, ""), L["text"], L["right"] - L["left"]):
+            y = line(ln, L["text"], y)
+    for ex in (entry.get("examples") or [])[:2]:
+        for ln in wrap_stroke_text("- " + ex, L["text"], L["right"] - L["left"]):
+            y = line(ln, L["text"], y)
+    y += L["gap"]
+    for key in ("farsi", "farsi_meaning"):
+        for ln in wrap_farsi(" ".join((entry.get(key) or "").split()), L["farsi"], L["right"] - L["left"]):
+            strokes, w = farsi_strokes(ln, L["farsi"], L["right"], y)
+            paths += strokes
+            y += int(L["farsi"] * 1.4)
+    return paths, y + L["gap"] * 2
+
+
+def bake_vocab_item(entry, state):
+    """The queue file(s) for one explanation: a page wipe first when it would not fit, then the entry.
+    `state` (dict: y, n) is the PC's memory of the page's cursor; returns [(name, bytes), ...]."""
+    L = VOCAB_LAYOUT
+    rec = StrokeRecorder()
+    items = []
+    paths, y_end = vocab_entry_paths(entry, state.get("y", L["top"]))
+    if y_end > L["bottom"] and state.get("y", L["top"]) > L["top"]:   # full: wipe the page, start at the top
+        rec.STEP_PX = ERASE_STEP_PX
+        rec.stroke(sweep_path(L["left"] - 10, L["top"] - 10, L["right"] + 10, L["bottom"], lane=10), is_eraser=True, pressure=4000)
+        rec.STEP_PX = VirtualStylus.STEP_PX
+        items.append((f"{state['n']:05d}-wipe.bin", rec.take()))
+        state["n"] += 1
+        paths, y_end = vocab_entry_paths(entry, L["top"])
+    for p in paths:
+        rec.stroke(p, pressure=2200)
+    items.append((f"{state['n']:05d}-{(entry.get('phrase') or 'entry')[:20].replace(' ', '_')}.bin", rec.take()))
+    state["n"] += 1
+    state["y"] = y_end
+    return items
+
+
+def queue_to_tablet(host, items):
+    """Put baked items into the tablet's queue directory (rmvocab draws them when the page is open)."""
+    for name, data in items:
+        subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"mkdir -p {TABLET_VOCAB_DIR}/queue && cat > {TABLET_VOCAB_DIR}/queue/.{name} && mv {TABLET_VOCAB_DIR}/queue/.{name} {TABLET_VOCAB_DIR}/queue/{name}"],
+                       input=data, check=True, capture_output=True)
+
+
+def install_vocab_app(host, doc_title="Vocabulary"):
+    """The Vocabulary page in the app folder and the rmvocab service that draws queued explanations on it."""
+    import shutil
+    binary = Path(__file__).resolve().with_name("app") / "rmvocab"
+    if not binary.exists():
+        print("❌ app/rmvocab is missing: build it with app/build.sh (needs Docker)")
+        return None
+    run_ssh("systemctl stop rmvocab 2>/dev/null; true", host=host)
+    doc_uuid = next((nb["uuid"] for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
+    if doc_uuid is None:
+        print(f"📄 Pushing the '{doc_title}' page into the '{CLOCK_FOLDER}' folder (the tablet reloads once)...", flush=True)
+        doc_uuid = push_chat_document(host, doc_title, pages=1, folder=CLOCK_FOLDER)
+    content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
+    pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
+    page_id = next((p["id"] if isinstance(p, dict) else p for p in pages if not (isinstance(p, dict) and p.get("deleted"))), None)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        (out / "config").write_text(f"doc={doc_uuid}\nrm={REMOTE_PATH}/{doc_uuid}/{page_id}.rm\n")
+        if os.path.exists("/etc/localtime"):
+            shutil.copy("/etc/localtime", out / "localtime")
+        shutil.copy(binary, out / "rmvocab")
+        (out / "rmvocab.service").write_text(RMCLOCK_UNIT.replace("rmclock", "rmvocab").replace(TABLET_APP_DIR, TABLET_VOCAB_DIR).replace("its Clock document", "its Vocabulary page"))
+        run_ssh(f"mkdir -p {TABLET_VOCAB_DIR}/queue", host=host)   # the queue survives a reinstall
+        tar = subprocess.run(["tar", "-C", str(out), "-cf", "-", "."], capture_output=True, check=True).stdout
+        subprocess.run(["ssh"] + get_ssh_base_opts() + [host, f"tar -C {TABLET_VOCAB_DIR} -xf -"], input=tar, check=True)
+    run_ssh(f"chmod +x {TABLET_VOCAB_DIR}/rmvocab && mv {TABLET_VOCAB_DIR}/rmvocab.service /etc/systemd/system/ && "
+            "systemctl daemon-reload && systemctl enable rmvocab >/dev/null 2>&1 && systemctl restart rmvocab", host=host)
+    print(f"✅ Vocabulary page installed: explanations are written on '{doc_title}' whenever it is open. Log: ssh {host} journalctl -u rmvocab -f")
+    return doc_uuid
+
+
+def vault_note(path, entry):
+    """Append one lookup to the vocabulary markdown (an Obsidian note or a plain file)."""
+    path = Path(os.path.expanduser(path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists()
+    with open(path, "a", encoding="utf-8") as f:
+        if new:
+            f.write("# Vocabulary\n\nWords looked up on the reMarkable, explained by Gemini.\n")
+        f.write(f"\n## {entry.get('phrase') or entry.get('text')}\n")
+        f.write(f"*{entry['time']}, {entry['doc']}{' p.' + str(entry['page']) if entry.get('page') else ''}*\n\n")
+        if entry.get("context"):
+            f.write(f"> {entry['context']}\n\n")
+        f.write(f"{entry.get('meaning', '')} {entry.get('note', '')}\n\n")
+        for ex in entry.get("examples") or []:
+            f.write(f"- {ex}\n")
+        if entry.get("farsi"):
+            f.write(f"\n**{entry['farsi']}** — {entry.get('farsi_meaning', '')}\n")
+
+
 VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabulary</title>
 <style>body{font:16px system-ui;margin:2em auto;max-width:56em;padding:0 1em} .e{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}
 .e img{max-width:100%;border:1px solid #eee} .meta{color:#666;font-size:.9em} .ctx{color:#444} .fa{direction:rtl;font-size:1.15em}</style>
@@ -2883,6 +3141,8 @@ def cmd_vocab(args):
     events_file = out / "events.json"
     events = json.loads(events_file.read_text()) if events_file.exists() else []
     lock = threading.Lock()
+    if getattr(args, "install", False):
+        install_vocab_app(host)
     docs = {}       # uuid -> {"title", "pages": [page ids], "pdf": local path or None, "texts": {index: page text}}
     seen = {(e["page_id"], e["text"]) for e in events if e.get("kind") == "highlight" and "page_id" in e}   # across restarts
     seen_marks = {(e["page_id"], tuple(e["mark"])) for e in events if e.get("kind") == "ink" and "mark" in e}
@@ -2895,15 +3155,54 @@ def cmd_vocab(args):
             counter[0] += 1
             return counter[0]
 
+    explain = getattr(args, "explain", True) and bool(os.getenv("GEMINI_API_KEY") or load_config().get("gemini_api_key"))
+    tablet = getattr(args, "tablet", True)
+    state_file = out / "page.json"
+    state = json.loads(state_file.read_text()) if state_file.exists() else {"y": VOCAB_LAYOUT["top"], "n": 1}
+
+    def save_events():
+        events_file.write_text(json.dumps(events, indent=1, ensure_ascii=False))
+
+    def explain_and_write(entry):
+        """In a worker thread: Gemini, the tablet's queue, the vault, the web page."""
+        teacher_file = Path(getattr(args, "teacher", None) or out / "teacher.md")
+        teacher = teacher_file.read_text() if teacher_file.exists() else None
+        r = explain_with_gemini(text=entry.get("text"), context=entry.get("context"), image_path=str(out / entry["image"]) if entry.get("image") else None, teacher=teacher)
+        with lock:
+            if "error" in r:
+                entry["explanation"] = "⚠️ " + r["error"]
+                save_events()
+                print(f"⚠️  #{entry['n']}: {r['error']}", flush=True)
+                return
+            entry.update({k: r[k] for k in ("phrase", "meaning", "note", "examples", "farsi", "farsi_meaning", "read") if k in r})
+            entry["explanation"] = f"{r.get('meaning', '')}\n{r.get('note', '')}\n" + "\n".join("- " + e for e in r.get("examples") or [])
+            entry["farsi"] = f"{r.get('farsi', '')} — {r.get('farsi_meaning', '')}"
+            save_events()
+            print(f"💡 #{entry['n']} {r.get('phrase')}: {r.get('meaning', '')[:80]} | {r.get('farsi', '')}", flush=True)
+            try:
+                vault_note(getattr(args, "vault", None) or out / "vocabulary.md", entry)
+            except Exception as e:
+                print(f"⚠️  vault note: {str(e)[:80]}", flush=True)
+            if tablet:
+                try:
+                    items = bake_vocab_item(entry, state)
+                    queue_to_tablet(host, items)
+                    state_file.write_text(json.dumps(state))
+                    print(f"✍️  #{entry['n']} queued for the Vocabulary page ({', '.join(n for n, _ in items)})", flush=True)
+                except Exception as e:
+                    print(f"⚠️  tablet queue: {str(e)[:100]}", flush=True)
+
     def emit(entry):
         with lock:
             entry.setdefault("n", counter[0] + 1)
             counter[0] = max(counter[0], entry["n"])
             entry["time"] = datetime.now().strftime("%H:%M:%S")
             events.append(entry)
-            events_file.write_text(json.dumps(events, indent=1, ensure_ascii=False))
+            save_events()
         what = entry.get("text") or entry.get("image")
         print(f"📖 #{entry['n']} {entry['kind']} in '{entry['doc']}'{' p.' + str(entry['page']) if entry.get('page') else ''}: {what}", flush=True)
+        if explain:
+            threading.Thread(target=explain_and_write, args=(entry,), daemon=True).start()
 
     def doc_info(uuid_):
         if uuid_ in docs:
@@ -3393,7 +3692,12 @@ def main():
     # vocab
     p_vocab = subparsers.add_parser("vocab", help="English learning: what you highlight on a PDF or loop in a notebook, captured (stage 1: local web page)")
     p_vocab.add_argument("--dir", type=str, default="vocab", help="Folder for the captured lookups and the web page (default ./vocab)")
-    p_vocab.add_argument("--port", type=int, default=8766, help="Local web page port (default 8766)")
+    p_vocab.add_argument("--port", type=int, default=8765, help="Local web page port (default 8765)")
+    p_vocab.add_argument("--vault", type=str, default=None, help="Markdown file to append every lookup to, e.g. an Obsidian note (default ./vocab/vocabulary.md)")
+    p_vocab.add_argument("--no-explain", dest="explain", action="store_false", help="Only capture; no Gemini explanation (needs GEMINI_API_KEY)")
+    p_vocab.add_argument("--no-tablet", dest="tablet", action="store_false", help="Don't write explanations on the tablet's Vocabulary page")
+    p_vocab.add_argument("--install", action="store_true", help="Also (re)install the Vocabulary page and its program on the tablet first (app/rmvocab)")
+    p_vocab.add_argument("--teacher", type=str, default=None, help="A text file with the teaching persona and method for the explanations (default ./vocab/teacher.md)")
     p_vocab.set_defaults(func=cmd_vocab)
 
     # dashboard
