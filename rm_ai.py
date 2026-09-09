@@ -2902,7 +2902,35 @@ def cmd_vocab(args):
                 info["texts"][index] = ""
         return info["texts"][index]
 
-    def on_stroke(pts):   # the pen: a loop around handwriting on any notebook page is a lookup
+    def pdf_words_in(info, index, box):
+        """The PDF page's printed words whose position falls inside `box` (display px). The tablet shows
+        the page's crop box fitted and centred on the screen; the small correction was measured against a
+        highlight's rectangle on an rM2 (text baselines sit ~29 px above where the plain fit puts them)."""
+        if info["pdf"] is None or index is None:
+            return ""
+        try:
+            import logging
+            logging.getLogger("pypdf").setLevel(logging.ERROR)
+            from pypdf import PdfReader
+            page = PdfReader(str(info["pdf"])).pages[index]
+            cx0, cy0, cx1, cy1 = [float(v) for v in page.cropbox]
+            W, H = cx1 - cx0, cy1 - cy0
+            s = min(1404 / W, 1872 / H)
+            dx, dy = (1404 - W * s) / 2 + 20, (1872 - H * s) / 2 - 29
+            chunks = []
+            def visit(text, cm, tm, fd, fs):
+                if text.strip():
+                    x = cm[0] * tm[4] + cm[2] * tm[5] + cm[4] - cx0
+                    y = cm[1] * tm[4] + cm[3] * tm[5] + cm[5] - cy0
+                    chunks.append((dx + x * s, dy + (H - y) * s, " ".join(text.split())))
+            page.extract_text(visitor_text=visit)
+        except Exception:
+            return ""
+        x0, y0, x1, y1 = box
+        hit = [(y, x, t) for x, y, t in chunks if x0 - 15 <= x <= x1 and y0 - 6 <= y <= y1 + 6]
+        return " ".join(t for _, _, t in sorted(hit))
+
+    def on_stroke(pts):   # the pen: a loop around handwriting, or around printed text on a PDF, is a lookup
         if not is_box(pts):
             strokes.append(pts)
             del strokes[:-400]
@@ -2911,16 +2939,28 @@ def cmd_vocab(args):
         box = (min(xs), min(ys), max(xs), max(ys))
         loop = pts[::max(1, len(pts) // 200)]
         content = [s for s in strokes if sum(1 for q in s if inside(q, loop)) >= 0.6 * len(s)]
+        uuid_ = open_document(host)
+        info = doc_info(uuid_) if uuid_ else {"title": "?", "pages": [], "pdf": None, "texts": {}}
         if not content:
+            if info["pdf"] is None:
+                return
+            try:   # the page on screen: the one whose file changed last
+                newest = run_ssh(f"cd {REMOTE_PATH}/{uuid_} 2>/dev/null && ls -t *.rm 2>/dev/null | head -n 1", host=host).strip()
+                index = info["pages"].index(newest[:-3]) if newest[:-3] in info["pages"] else None
+            except (RuntimeError, ValueError):
+                index = None
+            text = pdf_words_in(info, index, box)
+            if not text:
+                print(f"▢ loop on '{info['title']}' with nothing readable inside (box {[round(v) for v in box]})", flush=True)
+                return
+            emit({"kind": "selection", "doc": info["title"], "page": index + 1 if index is not None else None, "text": text, "box": [round(v) for v in box]})
             return
         for s in content:
             strokes.remove(s)
-        uuid_ = open_document(host)
-        title = doc_info(uuid_)["title"] if uuid_ else "?"
         n = len(events) + 1
         image = f"ink-{n}.png"
         render_strokes(content, box, out / image)
-        emit({"kind": "ink", "doc": title, "image": image, "box": [round(v) for v in box], "strokes": len(content)})
+        emit({"kind": "ink", "doc": info["title"], "image": image, "box": [round(v) for v in box], "strokes": len(content)})
 
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
