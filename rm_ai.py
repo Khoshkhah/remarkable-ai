@@ -2910,6 +2910,163 @@ def sentence_around(page_text, phrase):
 
 
 PERSIAN = re.compile("[\u0600-\u06FF]")
+# ---------------------------------------------------------------------------------------------------
+# Inline vocabulary: a flashcard drawn straight onto the page, on its own layer named after the word.
+#
+# A .rm v6 layer holds strokes, never images (scene items are Line / Text / GlyphRange / Rectangle), so
+# the card is drawn: a marker frame and the text filled with horizontal pen runs, the same trick the live
+# dashboard uses. Page coordinates are centred on the origin in v6, x runs -702..702 and y 0..1872.
+RM_PAGE = (1404, 1872)
+
+def rm_stroke(points, tool=None, width=2.0):
+    """One .rm line item from display coordinates."""
+    import rmscene.scene_items as si
+    tool = tool or si.Pen.FINELINER_2
+    return si.Line(color=si.PenColor.BLACK, tool=tool,
+                   points=[si.Point(x=x - RM_PAGE[0] / 2, y=y, speed=0, direction=0,
+                                    width=int(width * 10), pressure=100) for x, y in points],
+                   thickness_scale=width, starting_length=0.0)
+
+class _RmIds:
+    """CrdtIds for the items we add; starting high keeps them clear of what xochitl has used."""
+    def __init__(self, start): self.n = start
+    def __call__(self):
+        from rmscene.tagged_block_common import CrdtId
+        self.n += 1
+        return CrdtId(0, self.n)
+
+def _rm_layer_blocks(ids, root, name, strokes, left):
+    """The blocks of one layer: the node, its label, its place in the root's children, then the ink."""
+    from rmscene import SceneTreeBlock, TreeNodeBlock, SceneGroupItemBlock, SceneLineItemBlock
+    from rmscene.tagged_block_common import CrdtId, LwwValue
+    from rmscene.crdt_sequence import CrdtSequenceItem
+    import rmscene.scene_items as si
+    node = ids()
+    head = [SceneTreeBlock(tree_id=node, node_id=CrdtId(0, 0), is_update=True, parent_id=root)]
+    body = [TreeNodeBlock(group=si.Group(node_id=node, label=LwwValue(ids(), name),
+                                         visible=LwwValue(CrdtId(0, 0), True)))]
+    item = ids()
+    body.append(SceneGroupItemBlock(parent_id=root,
+                item=CrdtSequenceItem(item_id=item, left_id=left, right_id=CrdtId(0, 0),
+                                      deleted_length=0, value=node)))
+    prev = CrdtId(0, 0)
+    for line in strokes:
+        iid = ids()
+        body.append(SceneLineItemBlock(parent_id=node,
+                    item=CrdtSequenceItem(item_id=iid, left_id=prev, right_id=CrdtId(0, 0),
+                                          deleted_length=0, value=line)))
+        prev = iid
+    return head, body, item
+
+def rm_page_blocks(layers):
+    """A whole .rm v6 page: `layers` is [(name, [Line, ...]), ...], the first one the writing layer."""
+    from uuid import uuid4
+    from rmscene import AuthorIdsBlock, MigrationInfoBlock, PageInfoBlock, TreeNodeBlock
+    from rmscene.tagged_block_common import CrdtId
+    import rmscene.scene_items as si
+    root = CrdtId(0, 1)
+    ids = _RmIds(20)
+    head = [AuthorIdsBlock(author_uuids={1: uuid4()}),
+            MigrationInfoBlock(migration_id=CrdtId(1, 1), is_device=True),
+            PageInfoBlock(loads_count=1, merges_count=0, text_chars_count=0,
+                          text_lines_count=0, type_folio_use_count=0)]
+    body = [TreeNodeBlock(group=si.Group(node_id=root))]
+    left = CrdtId(0, 0)
+    for name, strokes in layers:
+        h, b, left = _rm_layer_blocks(ids, root, name, strokes, left)
+        head += h
+        body += b
+    return head + body
+
+def rm_add_layer(path, name, strokes):
+    """Append a layer to an existing page file, keeping everything already on it."""
+    import io
+    from rmscene import read_blocks, write_blocks, TreeNodeBlock, SceneGroupItemBlock
+    from rmscene.tagged_block_common import CrdtId
+    blocks = list(read_blocks(io.BytesIO(open(path, "rb").read())))
+    root = next(b.group.node_id for b in blocks if isinstance(b, TreeNodeBlock) and b.group.label.value == "")
+    used = [b.item.item_id.part2 for b in blocks if hasattr(b, "item") and hasattr(b.item, "item_id")]
+    used += [b.group.node_id.part2 for b in blocks if isinstance(b, TreeNodeBlock)]
+    ids = _RmIds(max(used or [20]) + 10)
+    left = CrdtId(0, 0)
+    for b in blocks:                                   # the new layer goes after the last one
+        if isinstance(b, SceneGroupItemBlock) and b.parent_id == root:
+            left = b.item.item_id
+    head, body, _ = _rm_layer_blocks(ids, root, name, strokes, left)
+    out = io.BytesIO()
+    write_blocks(out, blocks + head + body)            # readers take the blocks in order; ours come last
+    open(path, "wb").write(out.getvalue())
+    return len(strokes)
+
+INLINE_NOTEBOOK = "inline-vocab"   # the notebook the cards are written into, in the tablet's app folder
+
+def install_inline_notebook(host=None, title=INLINE_NOTEBOOK, pages=1, demo=None):
+    """Create the inline-vocab notebook (a native notebook, not a PDF) in the app folder: every page has a
+    writing layer for the words, and each card later becomes its own layer named after its word. A new
+    document is a library change, which is the one thing that really needs a xochitl restart."""
+    import io, json, tempfile, shutil
+    from uuid import uuid4
+    from pathlib import Path
+    from rmscene import write_blocks
+    existing = next((nb["uuid"] for nb in list_notebooks(host)
+                     if nb["title"].lower() == title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
+    doc = existing or str(uuid4())
+    folder = ensure_remote_folder(CLOCK_FOLDER, host=host)
+    stage = Path(tempfile.mkdtemp())
+    (stage / doc).mkdir()
+    page_ids = []
+    for i in range(pages):
+        pid = str(uuid4()); page_ids.append(pid)
+        layers = [("Words", [])]
+        if demo and i == 0:
+            layers.append(demo)
+        out = io.BytesIO(); write_blocks(out, rm_page_blocks(layers))
+        (stage / doc / f"{pid}.rm").write_bytes(out.getvalue())
+    (stage / f"{doc}.content").write_text(json.dumps({
+        "coverPageNumber": 0, "documentMetadata": {}, "dummyDocument": False, "extraMetadata": {},
+        "fileType": "notebook", "fontName": "", "formatVersion": 1, "lineHeight": -1, "margins": 125,
+        "orientation": "portrait", "originalPageCount": -1, "pageCount": len(page_ids), "pageTags": [],
+        "pages": page_ids, "redirectionPageMap": [], "sizeInBytes": "0", "tags": [],
+        "textAlignment": "justify", "textScale": 1, "zoomMode": "bestFit"}, indent=4))
+    (stage / f"{doc}.pagedata").write_text("Blank\n" * len(page_ids))
+    (stage / f"{doc}.metadata").write_text(json.dumps({
+        "createdTime": str(int(time.time() * 1000)), "deleted": False,
+        "lastModified": str(int(time.time() * 1000)), "lastOpened": "0", "lastOpenedPage": 0,
+        "metadatamodified": False, "modified": False, "new": False, "parent": folder, "pinned": False,
+        "source": "", "synced": False, "type": "DocumentType", "version": 1, "visibleName": title}, indent=4))
+    target = get_active_host(host)
+    subprocess.run(["scp", "-q", "-r"] + get_ssh_base_opts()
+                   + [str(p) for p in stage.iterdir()] + [f"{target}:{REMOTE_PATH}/"], check=True)
+    shutil.rmtree(stage, ignore_errors=True)
+    restart_xochitl(host)                      # a document that is new to the library: xochitl has to index it
+    print(f"📓 '{title}' {'updated' if existing else 'created'} in the {CLOCK_FOLDER} folder ({doc})")
+    return doc, page_ids
+
+CARD_PITCH = 3          # pixel rows between the horizontal runs that fill a glyph
+CARD_PAD = 44           # inside the frame
+
+def card_strokes(word, meaning, sample, sample_fa, box):
+    """A framed flashcard: a marker frame, the word, its Farsi meaning, one English sample and its
+    translation. Farsi is shaped and ordered by PIL+raqm, so it is drawn as it reads."""
+    import rmscene.scene_items as si
+    x, y, w, h = box
+    frame = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
+    out = [rm_stroke(frame, tool=si.Pen.MARKER_2, width=3.0)]
+    def put(text, size, ty, bold=False, rtl=False):
+        if not text:
+            return
+        tx = x + w - CARD_PAD - _text_width(text, size, bold) if rtl else x + CARD_PAD
+        for pl in text_strokes(text, size, tx, ty, pitch=CARD_PITCH, bold=bold):
+            out.append(rm_stroke(pl, width=1.6))
+    put(word, 72, y + CARD_PAD, bold=True)
+    put(meaning, 44, y + CARD_PAD + 104, rtl=True)
+    put(sample, 40, y + CARD_PAD + 190)
+    put(sample_fa, 38, y + CARD_PAD + 254, rtl=True)
+    return out
+
+def _text_width(text, size, bold=False):
+    return get_font(size, bold=bold).getbbox(text)[2]
+
 LESSON_FONT = {"regular": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"}
 
 
