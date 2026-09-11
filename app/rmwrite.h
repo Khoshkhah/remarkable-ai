@@ -27,6 +27,7 @@
 #define RM_PEN_FINELINER 17
 #define RM_PEN_MARKER    16
 #define RM_COLOR_BLACK    0
+#define RM_COLOR_WHITE    2
 
 /* ---- a growable buffer ------------------------------------------------------------------------- */
 struct rmbuf { unsigned char *p; size_t n, cap; };
@@ -119,13 +120,13 @@ static void rm_layer(struct rmbuf *out, uint64_t node, uint64_t label_ts, const 
 struct rmpt { float x, y; };
 
 /* One pen stroke. Display coordinates: v6 pages are centred on the origin, x runs -702..702. */
-static void rm_line(struct rmbuf *out, uint64_t layer, uint64_t id, uint64_t left,
-                    const struct rmpt *pts, int n, int tool, float width) {
+static void rm_line_c(struct rmbuf *out, uint64_t layer, uint64_t id, uint64_t left,
+                      const struct rmpt *pts, int n, int tool, float width, int color) {
     struct rmbuf p = {0}, sub = {0}, points = {0};
     rb_item_head(&p, layer, id, left, 0);
     rb_u8(&sub, 0x03);                               /* ITEM_TYPE 3: a Line */
     rb_int(&sub, 1, (uint32_t)tool);
-    rb_int(&sub, 2, RM_COLOR_BLACK);
+    rb_int(&sub, 2, (uint32_t)color);
     rb_double(&sub, 3, width);
     rb_float(&sub, 4, 0.0f);
     for (int i = 0; i < n; i++) {
@@ -140,6 +141,11 @@ static void rm_line(struct rmbuf *out, uint64_t layer, uint64_t id, uint64_t lef
     rb_id(&sub, 6, 0, 1);                            /* the timestamp rmscene always writes after the points */
     rb_sub(&p, 6, &sub);
     rb_block(out, 0x05, 2, 2, &p);
+}
+
+static void rm_line(struct rmbuf *out, uint64_t layer, uint64_t id, uint64_t left,
+                    const struct rmpt *pts, int n, int tool, float width) {
+    rm_line_c(out, layer, id, left, pts, n, tool, width, RM_COLOR_BLACK);
 }
 
 /* The three blocks every page starts with. `author` is any 16 bytes. */

@@ -2918,11 +2918,11 @@ PERSIAN = re.compile("[\u0600-\u06FF]")
 # dashboard uses. Page coordinates are centred on the origin in v6, x runs -702..702 and y 0..1872.
 RM_PAGE = (1404, 1872)
 
-def rm_stroke(points, tool=None, width=2.0):
+def rm_stroke(points, tool=None, width=2.0, color=None):
     """One .rm line item from display coordinates."""
     import rmscene.scene_items as si
     tool = tool or si.Pen.FINELINER_2
-    return si.Line(color=si.PenColor.BLACK, tool=tool,
+    return si.Line(color=color if color is not None else si.PenColor.BLACK, tool=tool,
                    points=[si.Point(x=x - RM_PAGE[0] / 2, y=y, speed=0, direction=0,
                                     width=int(width * 10), pressure=100) for x, y in points],
                    thickness_scale=width, starting_length=0.0)
@@ -3058,29 +3058,32 @@ def _card_font(kind):
     path = CARD_FONTS.get(kind)
     return path if path and os.path.exists(path) else None
 
-def card_strokes(card, box):
-    """A flashcard drawn as strokes: a highlighter wash for the background, the clock's rounded frame,
-    and the word with its English sense, its Farsi meaning, one sample with its translation, and the
-    words it sits near. `card` is the dict the teacher returns; missing lines are simply left out."""
+def card_strokes(card, box, dark=True):
+    """A flashcard drawn as strokes: a black field laid down with the marker and the writing in white on
+    top of it, inside the clock's rounded frame. `card` is the dict the teacher returns; missing lines are
+    simply left out. `dark=False` gives the plain version, ink on the page's own white."""
     import rmscene.scene_items as si
     x, y, w, h = box
+    ink = si.PenColor.WHITE if dark else si.PenColor.BLACK
     out = []
 
-    # background: the highlighter is translucent on the tablet, so a few wide passes tint the card
-    # without touching what is written underneath
-    for yy in range(int(y + 14), int(y + h - 12), 34):
-        out.append(rm_stroke([(x + 16, yy), (x + w - 16, yy)], tool=si.Pen.HIGHLIGHTER_2, width=30.0))
+    if dark:
+        # the field: marker passes closer together than the marker is wide, so it reads as one black block
+        for yy in range(int(y + 6), int(y + h - 4), 8):
+            out.append(rm_stroke([(x + 10, yy), (x + w - 10, yy)], tool=si.Pen.MARKER_2, width=3.0))
 
-    out.append(rm_stroke(rounded_rect(x, y, w, h, r=34), tool=si.Pen.FINELINER_2, width=3.0))
-    out.append(rm_stroke(rounded_rect(x + 7, y + 7, w - 14, h - 14, r=28), tool=si.Pen.FINELINER_2, width=1.4))
+    out.append(rm_stroke(rounded_rect(x, y, w, h, r=34), tool=si.Pen.FINELINER_2, width=3.0,
+                         color=si.PenColor.BLACK))
+    out.append(rm_stroke(rounded_rect(x + 9, y + 9, w - 18, h - 18, r=28), tool=si.Pen.FINELINER_2,
+                         width=1.6, color=ink))
 
-    def put(text, size, ty, kind, rtl=False, indent=0):
+    def put(text, size, ty, kind, rtl=False):
         if not text:
             return
         fp = _card_font(kind)
-        tx = x + w - CARD_PAD - _text_width(text, size, font_path=fp) if rtl else x + CARD_PAD + indent
+        tx = x + w - CARD_PAD - _text_width(text, size, font_path=fp) if rtl else x + CARD_PAD
         for pl in text_strokes(text, size, tx, ty, pitch=CARD_PITCH, font_path=fp):
-            out.append(rm_stroke(pl, width=1.5))
+            out.append(rm_stroke(pl, width=2.0 if dark else 1.5, color=ink))
 
     top = y + CARD_PAD - 8
     put(card.get("word"), 76, top, "word")
@@ -3088,7 +3091,8 @@ def card_strokes(card, box):
     put(card.get("meaning"), 40, top + 158, "farsi", rtl=True)
 
     rule = top + 224                                   # a hairline between the sense and the sample
-    out.append(rm_stroke([(x + CARD_PAD, rule), (x + w - CARD_PAD, rule)], tool=si.Pen.FINELINER_2, width=1.0))
+    out.append(rm_stroke([(x + CARD_PAD, rule), (x + w - CARD_PAD, rule)], tool=si.Pen.FINELINER_2,
+                         width=1.2, color=ink))
 
     put(card.get("sample"), 40, rule + 26, "sample")
     put(card.get("translation"), 38, rule + 80, "farsi", rtl=True)
