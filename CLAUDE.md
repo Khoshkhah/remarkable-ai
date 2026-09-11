@@ -271,6 +271,21 @@ made on the PC in tablet form (`local_lessons_for_tablet`: PNG → zlib) and the
 highlighter is the tool). `RM_FIXTURES=<dir>` answers Gemini from `gemini.json` and skips the restart
 (`rmvocab <dir> [xochitl.conf] [event device]`; `journalctl -u rmvocab -f` on the tablet).
 
+**Writing `.rm` on the tablet** (`app/rmwrite.h`): a minimal v6 *writer*, so the tablet can put a
+flashcard on the page a word was circled on. A layer holds strokes and never images (the scene items are
+Line, Text, GlyphRange, Rectangle), so the card is drawn, not typeset. The framing is the one `live_strokes`
+already walks: 43-byte header, then blocks of `uint32` length, `uint8` 0, min and current version, type;
+inside, tags are `varuint(index << 4 | type)` (ID 0xF, Length4 0xC, Byte8 0x8, Byte4 0x4, Byte1 0x1), a
+CrdtId is `uint8 part1` + varuint `part2`, a subblock is a Length4 tag with a `uint32` length. A layer is
+three blocks - `SceneTreeBlock` (the node exists), `TreeNodeBlock` (its name), `SceneGroupItemBlock` (it is
+one of the root's children) - then one `SceneLineItemBlock` per stroke, each line ending with the `id(6)`
+timestamp rmscene always writes after the points (leaving it out makes the block unreadable, which is how
+it was found). **A reader takes the blocks in order, so a layer is appended by appending its blocks**: the
+page already on the tablet is never rewritten, only grown, and `rm_scan()` reads back the largest CrdtId in
+use and the root's last child so the new ids and the sibling order are right. `app/test_rmwrite.c` writes a
+page on the PC (`gcc -o /tmp/w app/test_rmwrite.c && /tmp/w /tmp/out.rm`) to be checked against rmscene and
+`render_rm_to_png`, which is how the writer is verified without a tablet.
+
 ## Agent configuration lives in three places and is copied outward
 
 - `.claude/commands/*.md` — Claude Code slash commands
