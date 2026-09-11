@@ -245,10 +245,16 @@ else the paragraph's; a Farsi line, `is_rtl`, is right-aligned with runs placed 
 mirrored in R runs), wraps on spaces (`paragraph`) and paginates; glyphs the atlas lacks (emoji) are skipped.
 Each page is one zlib stream `lessons/NNNN-<p>.z` beside `lessons/NNNN.txt` (phrase, context, source, blank,
 lesson). `build_pdf` joins every page into the Vocabulary PDF (FlateDecode gray images) and `rebuild_if_due`,
-only when `may_restart()` and the lesson count differs from `state`'s `pushed=`, swaps it in with a fresh
-`.content` (page count), drops the document's `.rm` files (handwriting on lesson pages does not survive),
-clears the Words page when every loop on it is done (`done`: loop signatures; a loop erased by hand is
-forgotten), touches `lastModified` and restarts xochitl. A check mark (`check.bin`) is drawn beside a loop
+as soon as the lesson count differs from `state`'s `pushed=` and the Vocabulary document itself is closed,
+swaps it in with a fresh `.content` (page count), drops the document's `.rm` files (handwriting on lesson
+pages does not survive), clears the Words page when every loop on it is done *and that page is closed*
+(`done`: loop signatures; a loop erased by hand is forgotten; deleting the `.rm` under an open page is
+undone by the copy xochitl holds) and touches `lastModified` - **with no restart**: the user works on while
+the lessons arrive underneath. Whether xochitl re-reads a document from disk when it opens it, or trusts
+the page list it cached, is not documented; `reload_if_stale` settles it per swap by reading the pageCount
+back out of `.content` once xochitl has rewritten it (its own rewrite is the one carrying `cPages`). Equal
+to what we wrote means xochitl picked the pages up by itself and nothing is ever reloaded; fewer means it
+is showing a stale document, and only then does a restart follow, at a `may_restart()` moment. A check mark (`check.bin`) is drawn beside a loop
 whose lesson is made, under `page_on_screen()` for the Words document. `inbox/<name>.txt` (+ `.png`) are
 lookups the PC sends: the watcher (`cmd_vocab`) still reads highlights on PDFs/EPUBs (`read_highlights`) and
 highlighter/loop marks over handwriting in other notebooks (`read_marked_ink`, `PenReader`; the Words page is

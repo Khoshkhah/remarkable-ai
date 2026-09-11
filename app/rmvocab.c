@@ -501,9 +501,49 @@ static void touch_metadata(const char *base) {   /* lastModified = now, so the l
     free(m);
 }
 static int page_loops = 0, ndone = 0;
-static void rebuild_if_due(void) {   /* the document gets every lesson so far, at a moment a restart costs nothing */
+/* What xochitl thinks the document holds: it rewrites .content with its own page list (cPages) whenever it
+ * opens or closes a document, so the pageCount in there is what the reader sees. Returns -1 until it has
+ * looked at the document since our swap (no cPages in the file: that one is still ours). */
+static int pages_on_screen(const char *base) {
+    char path[700]; snprintf(path, sizeof path, "%s.content", base);
+    FILE *f = fopen(path, "r"); if (!f) return -1;
+    char *buf = malloc(1 << 18); if (!buf) { fclose(f); return -1; }
+    size_t n = fread(buf, 1, (1 << 18) - 1, f); buf[n] = 0; fclose(f);
+    int pages = -1;
+    const char *p = strstr(buf, "\"cPages\"");
+    if (p && (p = strstr(buf, "\"pageCount\""))) pages = atoi(strchr(p, ':') + 1);
+    free(buf);
+    return pages;
+}
+
+/* The document is swapped in place, with nothing open on it and no restart -- the user asked for the
+ * lessons to arrive without the tablet reloading anything. Whether xochitl re-reads a document from disk
+ * when it opens it, or trusts the page list it cached, is not documented anywhere; so we look afterwards
+ * (pages_on_screen) and only restart, at a quiet moment, if it is really showing fewer pages than we put
+ * there. When it picks them up by itself nothing is ever reloaded. */
+static void reload_if_stale(void) {
+    char v[32]; int pages = read_kv("state", "pages", v, sizeof v) ? atoi(v) : 0;
+    if (!pages) return;
+    char base[600]; snprintf(base, sizeof base, "%.*s", (int)(strlen(pdfpath) - 4), pdfpath);
+    int shown = pages_on_screen(base);
+    if (shown < 0) return;                       /* xochitl has not opened the document since the swap */
+    char path[700]; snprintf(path, sizeof path, "%s/state", dir);
+    if (shown >= pages) {
+        fprintf(stderr, "xochitl picked the %d pages up by itself, no restart needed\n", pages);
+        FILE *f = fopen(path, "w"); if (f) { fprintf(f, "pushed=%d\n", lessons_count()); fclose(f); }
+        return;
+    }
+    if (!may_restart()) return;                  /* it is stale: the restart waits for a moment it costs nothing */
+    fprintf(stderr, "xochitl still shows %d of %d pages: restarting so the new lessons appear\n", shown, pages);
+    FILE *f = fopen(path, "w"); if (f) { fprintf(f, "pushed=%d\n", lessons_count()); fclose(f); }
+    restart_xochitl();
+}
+
+static void rebuild_if_due(void) {   /* the document gets every lesson so far, while nothing is open on it */
     int have = lessons_count(); char v[32]; int pushed = read_kv("state", "pushed", v, sizeof v) ? atoi(v) : -1;
-    if (!have || have == pushed || !may_restart()) return;
+    if (!have || have == pushed) return;
+    if (doc_open(doc)) return;                       /* never swap the file under an open document; anything
+                                                        else may stay open, nothing is reloaded */
     char base[600], tmp[700]; snprintf(base, sizeof base, "%.*s", (int)(strlen(pdfpath) - 4), pdfpath); snprintf(tmp, sizeof tmp, "%s.new", pdfpath);
     int pages = build_pdf(tmp);
     if (!pages || rename(tmp, pdfpath)) { fprintf(stderr, "could not build the Vocabulary document\n"); unlink(tmp); return; }
@@ -513,11 +553,12 @@ static void rebuild_if_due(void) {   /* the document gets every lesson so far, a
     clear_rm(base);
     touch_metadata(base);
     int cleared = 0;
-    if (ndone > 0 && page_loops == ndone) { clear_rm(wdir); unlink(done_path); ndone = 0; page_loops = 0; cleared = 1; }   /* every loop on the Words page became a lesson */
+    /* every loop on the Words page became a lesson -- but only while that page is closed, or the deleted
+     * .rm is simply written back by the copy xochitl is holding */
+    if (ndone > 0 && page_loops == ndone && !doc_open(words_doc)) { clear_rm(wdir); unlink(done_path); ndone = 0; page_loops = 0; cleared = 1; }
     snprintf(path, sizeof path, "%s/state", dir);
-    f = fopen(path, "w"); if (f) { fprintf(f, "pushed=%d\n", have); fclose(f); }
-    fprintf(stderr, "Vocabulary document rebuilt: %d lessons, %d pages%s; restarting xochitl\n", have, pages, cleared ? ", Words page cleared" : "");
-    restart_xochitl();
+    f = fopen(path, "w"); if (f) { fprintf(f, "pushed=%d\npages=%d\n", have, pages); fclose(f); }
+    fprintf(stderr, "Vocabulary document rebuilt in place: %d lessons, %d pages%s; nothing reloaded\n", have, pages, cleared ? ", Words page cleared" : "");
 }
 
 /* ---------- the Words page: loops done, lessons made ---------- */
@@ -650,6 +691,7 @@ int main(int argc, char **argv) {
         }
         inbox_poll();
         rebuild_if_due();
+        reload_if_stale();
         sleep(2);
     }
 }
