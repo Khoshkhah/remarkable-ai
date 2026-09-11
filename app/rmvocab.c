@@ -940,6 +940,24 @@ int main(int argc, char **argv) {
     /* dry run, off the tablet: draw one card from a saved answer onto a page and stop, so the layout
      * can be looked at with rmscene and render_rm_to_png before any of it runs for real.
      *   RM_CARD_PAGE=<page.rm> RM_CARD_TEXT=<answer.txt> rmvocab <dir with the atlases> */
+    /* what the tablet sees on a page: every stroke, and which of them are loops with ink inside.
+     *   RM_PAGE_DEBUG=<page.rm> rmvocab <dir> */
+    const char *dbg = getenv("RM_PAGE_DEBUG");
+    if (dbg) {
+        int n = read_page(dbg);
+        fprintf(stderr, "read_page: %d strokes\n", n);
+        for (int i = 0; i < n; i++) {
+            struct stroke *k = &strokes[i];
+            static int idx[4096];
+            int ink = is_ink(k->tool), loop = ink && is_loop(k);
+            int nc = loop ? content_of(k, idx, 4096) : 0;
+            if (i < 40 || loop)
+                fprintf(stderr, "  [%d] layer=%llu tool=%d pts=%d box=%.0f,%.0f-%.0f,%.0f%s%s nc=%d\n",
+                        i, (unsigned long long)k->layer, k->tool, k->n, k->x0, k->y0, k->x1, k->y1,
+                        ink ? " ink" : "", loop ? " LOOP" : "", nc);
+        }
+        return 0;
+    }
     const char *cp_page = getenv("RM_CARD_PAGE"), *cp_text = getenv("RM_CARD_TEXT");
     if (cp_page && cp_text) {
         size_t n; char *t = slurp(cp_text, &n);
