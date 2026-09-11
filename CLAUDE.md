@@ -59,8 +59,12 @@ directory keyed by UUID:
   pushed documents
 
 Folders are documents of `type: CollectionType`; `list_notebooks()` reads every `.metadata` in one
-SSH round-trip and rebuilds the tree by walking `parent` chains. **Any write to xochitl requires
-`systemctl restart xochitl`** for the library to notice it — `cmd_push` does it at the end, and
+SSH round-trip and rebuilds the tree by walking `parent` chains. **A write to xochitl requires
+`systemctl restart xochitl`** for the *library* to notice it - a new document, a title, a folder -
+but **an existing document's own content does not**: xochitl re-reads the PDF and `.content` from
+disk when it opens the document. Measured 2026-09-11, twice: rmvocab swapped a 18-page Vocabulary PDF
+for a 20-page one with no restart, and the `.content` xochitl wrote back on opening said `pageCount: 20`
+(`reload_if_stale`). So a document being updated in place never needs a reload; only the library does — `cmd_push` does it at the end, and
 `ensure_remote_folder` relies on that same restart.
 
 **Lookup semantics an agent depends on.** `read <name>` matches exact full-path or title first,
@@ -250,11 +254,11 @@ swaps it in with a fresh `.content` (page count), drops the document's `.rm` fil
 pages does not survive), clears the Words page when every loop on it is done *and that page is closed*
 (`done`: loop signatures; a loop erased by hand is forgotten; deleting the `.rm` under an open page is
 undone by the copy xochitl holds) and touches `lastModified` - **with no restart**: the user works on while
-the lessons arrive underneath. Whether xochitl re-reads a document from disk when it opens it, or trusts
-the page list it cached, is not documented; `reload_if_stale` settles it per swap by reading the pageCount
-back out of `.content` once xochitl has rewritten it (its own rewrite is the one carrying `cPages`). Equal
-to what we wrote means xochitl picked the pages up by itself and nothing is ever reloaded; fewer means it
-is showing a stale document, and only then does a restart follow, at a `may_restart()` moment. A check mark (`check.bin`) is drawn beside a loop
+the lessons arrive underneath. `reload_if_stale` checks the swap landed, by reading the pageCount back
+out of `.content` once xochitl has rewritten it (its own rewrite is the one carrying `cPages`). Equal to
+what we wrote means xochitl picked the pages up by itself - which is what it does, measured - and nothing
+is ever reloaded; fewer would mean a stale document, and only then would a restart follow at a
+`may_restart()` moment. The check stays as the guard on an undocumented behaviour. A check mark (`check.bin`) is drawn beside a loop
 whose lesson is made, under `page_on_screen()` for the Words document. `inbox/<name>.txt` (+ `.png`) are
 lookups the PC sends: the watcher (`cmd_vocab`) still reads highlights on PDFs/EPUBs (`read_highlights`) and
 highlighter/loop marks over handwriting in other notebooks (`read_marked_ink`, `PenReader`; the Words page is
