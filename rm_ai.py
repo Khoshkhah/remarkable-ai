@@ -2558,11 +2558,11 @@ def sweep_path(x0, y0, x1, y1, lane=SWEEP_LANE):
     return pts
 
 
-def text_strokes(text, size, x, y, pitch, bold=True):
+def text_strokes(text, size, x, y, pitch, bold=True, font_path=None):
     """Pen strokes that fill `text`, rendered in the dashboard font at (x, y): one horizontal run per
     dark span on every `pitch`-th pixel row, so the pen reproduces the printed glyph shapes."""
-    from PIL import Image, ImageDraw
-    font = get_font(size, bold=bold)
+    from PIL import Image, ImageDraw, ImageFont
+    font = ImageFont.truetype(font_path, size) if font_path else get_font(size, bold=bold)
     left, top, right, bottom = font.getbbox(text)
     img = Image.new("L", (right + 2, bottom + 2), 255)
     ImageDraw.Draw(img).text((0, 0), text, font=font, fill=0)
@@ -3042,30 +3042,72 @@ def install_inline_notebook(host=None, title=INLINE_NOTEBOOK, pages=1, demo=None
     print(f"📓 '{title}' {'updated' if existing else 'created'} in the {CLOCK_FOLDER} folder ({doc})")
     return doc, page_ids
 
-CARD_PITCH = 3          # pixel rows between the horizontal runs that fill a glyph
-CARD_PAD = 44           # inside the frame
+CARD_PITCH = 2          # pixel rows between the horizontal runs that fill a glyph: 2 reads as solid ink
+CARD_PAD = 52           # inside the frame
+# The card is drawn, so the "font" is whichever face fills best at this size. Serif for the word (it
+# carries the card), the condensed sans for the English lines, DejaVu for Farsi -- the only one here with
+# Arabic. Every path falls back to the dashboard face when it is missing.
+CARD_FONTS = {
+    "word":    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "english": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+    "sample":  "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+    "farsi":   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+}
 
-def card_strokes(word, meaning, sample, sample_fa, box):
-    """A framed flashcard: a marker frame, the word, its Farsi meaning, one English sample and its
-    translation. Farsi is shaped and ordered by PIL+raqm, so it is drawn as it reads."""
+def _card_font(kind):
+    path = CARD_FONTS.get(kind)
+    return path if path and os.path.exists(path) else None
+
+def card_strokes(card, box):
+    """A flashcard drawn as strokes: a highlighter wash for the background, the clock's rounded frame,
+    and the word with its English sense, its Farsi meaning, one sample with its translation, and the
+    words it sits near. `card` is the dict the teacher returns; missing lines are simply left out."""
     import rmscene.scene_items as si
     x, y, w, h = box
-    frame = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
-    out = [rm_stroke(frame, tool=si.Pen.MARKER_2, width=3.0)]
-    def put(text, size, ty, bold=False, rtl=False):
+    out = []
+
+    # background: the highlighter is translucent on the tablet, so a few wide passes tint the card
+    # without touching what is written underneath
+    for yy in range(int(y + 14), int(y + h - 12), 34):
+        out.append(rm_stroke([(x + 16, yy), (x + w - 16, yy)], tool=si.Pen.HIGHLIGHTER_2, width=30.0))
+
+    out.append(rm_stroke(rounded_rect(x, y, w, h, r=34), tool=si.Pen.FINELINER_2, width=3.0))
+    out.append(rm_stroke(rounded_rect(x + 7, y + 7, w - 14, h - 14, r=28), tool=si.Pen.FINELINER_2, width=1.4))
+
+    def put(text, size, ty, kind, rtl=False, indent=0):
         if not text:
             return
-        tx = x + w - CARD_PAD - _text_width(text, size, bold) if rtl else x + CARD_PAD
-        for pl in text_strokes(text, size, tx, ty, pitch=CARD_PITCH, bold=bold):
-            out.append(rm_stroke(pl, width=1.6))
-    put(word, 72, y + CARD_PAD, bold=True)
-    put(meaning, 44, y + CARD_PAD + 104, rtl=True)
-    put(sample, 40, y + CARD_PAD + 190)
-    put(sample_fa, 38, y + CARD_PAD + 254, rtl=True)
+        fp = _card_font(kind)
+        tx = x + w - CARD_PAD - _text_width(text, size, font_path=fp) if rtl else x + CARD_PAD + indent
+        for pl in text_strokes(text, size, tx, ty, pitch=CARD_PITCH, font_path=fp):
+            out.append(rm_stroke(pl, width=1.5))
+
+    top = y + CARD_PAD - 8
+    put(card.get("word"), 76, top, "word")
+    put(card.get("definition"), 40, top + 104, "english")
+    put(card.get("meaning"), 40, top + 158, "farsi", rtl=True)
+
+    rule = top + 224                                   # a hairline between the sense and the sample
+    out.append(rm_stroke([(x + CARD_PAD, rule), (x + w - CARD_PAD, rule)], tool=si.Pen.FINELINER_2, width=1.0))
+
+    put(card.get("sample"), 40, rule + 26, "sample")
+    put(card.get("translation"), 38, rule + 80, "farsi", rtl=True)
+    put(("~ " + card["similar"]) if card.get("similar") else None, 36, rule + 146, "english")
     return out
 
-def _text_width(text, size, bold=False):
-    return get_font(size, bold=bold).getbbox(text)[2]
+def _text_width(text, size, bold=False, font_path=None):
+    from PIL import ImageFont
+    font = ImageFont.truetype(font_path, size) if font_path else get_font(size, bold=bold)
+    return font.getbbox(text)[2]
+
+def rounded_rect(x, y, w, h, r=30):
+    """The clock's frame shape: a rectangle with quarter-circle corners, as a closed polyline."""
+    pts = []
+    for cx, cy, a0 in ((x + w - r, y + r, -90), (x + w - r, y + h - r, 0),
+                       (x + r, y + h - r, 90), (x + r, y + r, 180)):
+        pts += [(cx + r * math.cos(math.radians(a0 + 90 * i / 6)),
+                 cy + r * math.sin(math.radians(a0 + 90 * i / 6))) for i in range(7)]
+    return pts + [pts[0]]
 
 LESSON_FONT = {"regular": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"}
 
