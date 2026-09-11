@@ -3055,7 +3055,7 @@ CARD_FONTS = {
 }
 
 def _card_font(kind):
-    path = CARD_FONTS.get(kind)
+    path = CARD_FONTS.get("english" if kind == "farsi_tone" else kind)
     return path if path and os.path.exists(path) else None
 
 def card_strokes(card, box, dark=True):
@@ -3077,13 +3077,17 @@ def card_strokes(card, box, dark=True):
     out.append(rm_stroke(rounded_rect(x + 9, y + 9, w - 18, h - 18, r=28), tool=si.Pen.FINELINER_2,
                          width=1.6, color=ink))
 
+    # the two languages are told apart by tone, the only colour an e-ink tablet really has: the English
+    # at full strength, the Farsi a step back
+    soft = si.PenColor.GRAY
     def put(text, size, ty, kind, rtl=False):
         if not text:
             return
         fp = _card_font(kind)
         tx = x + w - CARD_PAD - _text_width(text, size, font_path=fp) if rtl else x + CARD_PAD
+        c = soft if kind in ("farsi", "farsi_tone") else ink
         for pl in text_strokes(text, size, tx, ty, pitch=CARD_PITCH, font_path=fp):
-            out.append(rm_stroke(pl, width=2.0 if dark else 1.5, color=ink))
+            out.append(rm_stroke(pl, width=2.0 if dark else 1.5, color=c))
 
     top = y + CARD_PAD - 8
     put(card.get("word"), 76, top, "word")
@@ -3096,7 +3100,7 @@ def card_strokes(card, box, dark=True):
 
     put(card.get("sample"), 40, rule + 26, "sample")
     put(card.get("translation"), 38, rule + 80, "farsi", rtl=True)
-    put(("~ " + card["similar"]) if card.get("similar") else None, 36, rule + 146, "english")
+    put(("~ " + card["similar"]) if card.get("similar") else None, 36, rule + 146, "farsi_tone")
     return out
 
 def _text_width(text, size, bold=False, font_path=None):
