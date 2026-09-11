@@ -488,6 +488,7 @@ static int card_rounded(struct rmpt *out, float x, float y, float w, float h, fl
     return n;
 }
 
+static int card_dark = 0;        /* a black field with the writing in white; off, the page's own white */
 static uint64_t card_id, card_prev, card_node;
 static struct rmbuf card_out;
 
@@ -527,7 +528,7 @@ static void card_text(const char *text, int size, int bold, int dst_x, int dst_r
             else if (!dark && run >= 0) {
                 if (x - run >= CARD_MINRUN) {
                     struct rmpt p[2] = {{run + dx, y + dy}, {x - 1 + dx, y + dy}};
-                    card_emit(p, 2, RM_PEN_FINELINER, pen, RM_COLOR_WHITE);
+                    card_emit(p, 2, RM_PEN_FINELINER, pen, card_dark ? RM_COLOR_WHITE : RM_COLOR_BLACK);
                 }
                 run = -1;
             }
@@ -550,28 +551,30 @@ static int draw_card(const char *rmpath, const struct card *c, int bx, int by, i
     card_prev = 0;
 
     struct rmpt pts[64];
-    for (int y = by + 5; y < by + bh - 3; y += 4) {          /* the field: passes at a quarter of the marker's width */
-        pts[0].x = (float)(bx + 8); pts[0].y = (float)y;
-        pts[1].x = (float)(bx + bw - 8); pts[1].y = (float)y;
-        card_emit(pts, 2, RM_PEN_MARKER, 4.0f, RM_COLOR_BLACK);
-    }
+    if (card_dark)                                          /* the field: passes at a quarter of the marker's width */
+        for (int y = by + 5; y < by + bh - 3; y += 4) {
+            pts[0].x = (float)(bx + 8); pts[0].y = (float)y;
+            pts[1].x = (float)(bx + bw - 8); pts[1].y = (float)y;
+            card_emit(pts, 2, RM_PEN_MARKER, 4.0f, RM_COLOR_BLACK);
+        }
     int n = card_rounded(pts, (float)bx, (float)by, (float)bw, (float)bh, 34);
     card_emit(pts, n, RM_PEN_FINELINER, 3.0f, RM_COLOR_BLACK);
     n = card_rounded(pts, bx + 9.0f, by + 9.0f, bw - 18.0f, bh - 18.0f, 28);
-    card_emit(pts, n, RM_PEN_FINELINER, 1.6f, RM_COLOR_WHITE);
+    card_emit(pts, n, RM_PEN_FINELINER, 1.6f, card_dark ? RM_COLOR_WHITE : RM_COLOR_BLACK);
 
     int left = bx + CARD_PAD, right = bx + bw - CARD_PAD, top = by + CARD_PAD - 8;
-    card_text(c->word,        76, 1, left, right, top,       CARD_PITCH,     2.2f);
-    card_text(c->definition,  40, 0, left, right, top + 116,  CARD_PITCH,     2.2f);
-    card_text(c->meaning,     40, 0, left, right, top + 172,  CARD_PITCH + 1, 1.5f);
+    float full = card_dark ? 2.2f : 1.5f, fine = card_dark ? 1.5f : 1.2f;
+    card_text(c->word,        76, 1, left, right, top,       CARD_PITCH,     full);
+    card_text(c->definition,  40, 0, left, right, top + 116,  CARD_PITCH,     full);
+    card_text(c->meaning,     40, 0, left, right, top + 172,  CARD_PITCH + 1, fine);
     int rule = top + 236;
     pts[0].x = (float)left; pts[0].y = (float)rule; pts[1].x = (float)right; pts[1].y = (float)rule;
-    card_emit(pts, 2, RM_PEN_FINELINER, 1.2f, RM_COLOR_WHITE);
-    card_text(c->sample,      40, 0, left, right, rule + 30,  CARD_PITCH,     2.2f);
-    card_text(c->translation, 40, 0, left, right, rule + 86,  CARD_PITCH + 1, 1.5f);
+    card_emit(pts, 2, RM_PEN_FINELINER, 1.2f, card_dark ? RM_COLOR_WHITE : RM_COLOR_BLACK);
+    card_text(c->sample,      40, 0, left, right, rule + 30,  CARD_PITCH,     full);
+    card_text(c->translation, 40, 0, left, right, rule + 86,  CARD_PITCH + 1, fine);
     if (c->similar[0]) {
         char s[320]; snprintf(s, sizeof s, "~ %s", c->similar);
-        card_text(s,          36, 0, left, right, rule + 150, CARD_PITCH + 1, 1.5f);
+        card_text(s,          36, 0, left, right, rule + 150, CARD_PITCH + 1, fine);
     }
 
     FILE *f = fopen(rmpath, "ab");

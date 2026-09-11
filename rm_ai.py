@@ -3058,7 +3058,7 @@ def _card_font(kind):
     path = CARD_FONTS.get("english" if kind == "farsi_tone" else kind)
     return path if path and os.path.exists(path) else None
 
-def card_strokes(card, box, dark=True):
+def card_strokes(card, box, dark=False):
     """A flashcard drawn as strokes: a black field laid down with the marker and the writing in white on
     top of it, inside the clock's rounded frame. `card` is the dict the teacher returns; missing lines are
     simply left out. `dark=False` gives the plain version, ink on the page's own white."""
