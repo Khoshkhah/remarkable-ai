@@ -509,7 +509,7 @@ static void swap_daily_page(void) {
     if (!compose_page(src, tmp) || rename(tmp, pdf)) { fprintf(stderr, "could not compose the page for %s\n", today); return; }
     f = fopen(ppath, "w"); if (f) { fprintf(f, "%s %ld\n", today, (long)now); fclose(f); }
     fprintf(stderr, "printed page for %s composed (%s), restarting xochitl\n", today, new_day ? "new day" : "fresh weather");
-    if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
+    restart_xochitl();
 }
 
 

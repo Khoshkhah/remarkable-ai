@@ -20,6 +20,14 @@ int main(void) {
     journal_line("rm.localization.language Activated translation: en");
     assert(!screen_off && !doc_running);                   /* a fresh xochitl is awake with nothing open */
 
+    /* xochitl is done with the documents: the settle runs from the last worker's exit, not the clock */
+    journal_line("rm.docworker -> worker on b5981093-f629-4acc-8c78-f7baad471fde now running");
+    assert(workers == 1 && !workers_quiet());              /* a document is open: never */
+    journal_line("rm.docworker -> worker on b5981093-f629-4acc-8c78-f7baad471fde now exiting");
+    assert(workers == 0 && !workers_quiet());              /* just closed: xochitl may still be winding it down */
+    workers_quiet_at -= WORKER_SETTLE_S;
+    assert(workers_quiet());
+
     printf("ok\n");
     return 0;
 }

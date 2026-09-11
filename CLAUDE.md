@@ -141,10 +141,21 @@ services before any push, and `dashboard --install --no-push` reuses the page wi
 `app/build.sh` (Docker, `alpine` arm/v7 image, musl static); the binary is committed. It takes
 `rmclock <dir> [xochitl.conf] [event device]` so a dry run on the PC against a plain file works.
 
-**Restarting xochitl** (a rebuilt document, a swapped page) needs a moment when the reload costs nothing:
-`may_restart()` in `stylus.h` is the home screen quiet for `HOME_QUIET_S` *or* the screen off. A tablet
-parked on one document never reaches the home screen (measured gaps between one document closing and the
-next opening: 2-72 s, never 180), which left the daily page and the Vocabulary document stuck for days.
+**Restarting xochitl** always goes through `restart_xochitl()` (`stylus.h`, and `RESTART_XOCHITL` /
+`restart_xochitl()` in `rm_ai.py`), never a bare `systemctl restart xochitl`: xochitl 3.28 segfaults in its
+own teardown often enough to matter - measured on an idle tablet with nothing open, after its whole clean
+shutdown had run - and systemd answers that with `OnFailure=remarkable-fail.service`, which on a device
+with no pending firmware update does one thing, `systemctl reboot`. xochitl's own `Restart=on-failure`
+brings it back without that, so the helper masks `remarkable-fail.service` around the restart and unmasks
+it from a detached shell 25 s later. The 180 s wait the restart used to sit behind never prevented this
+crash; it only made the restart rare.
+
+It also needs a moment when the reload costs nothing:
+`may_restart()` in `stylus.h` is the home screen *or* the screen off, in both cases with xochitl done
+winding documents down: `workers_quiet()` counts the `worker on <uuid> now running`/`now exiting` lines and
+waits `WORKER_SETTLE_S` (20 s) past the last exit. That signal replaced the age of `xochitl.conf`, whose
+180 s never came true on a tablet in use (measured gaps between one document closing and the next opening:
+2-72 s), which left the daily page and the Vocabulary document stuck for days.
 The screen is the way in: xochitl logs `Changing display state from Normal to DeepSleep` and asks the
 kernel to suspend ~12 s later, and stopping xochitl cancels that suspend, so the window is as long as
 needed; whatever document is open is reloaded and restored by xochitl, unseen. `rmdash` therefore calls

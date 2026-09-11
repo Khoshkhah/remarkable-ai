@@ -517,7 +517,7 @@ static void rebuild_if_due(void) {   /* the document gets every lesson so far, a
     snprintf(path, sizeof path, "%s/state", dir);
     f = fopen(path, "w"); if (f) { fprintf(f, "pushed=%d\n", have); fclose(f); }
     fprintf(stderr, "Vocabulary document rebuilt: %d lessons, %d pages%s; restarting xochitl\n", have, pages, cleared ? ", Words page cleared" : "");
-    if (!getenv("RM_FIXTURES")) { if (system("systemctl restart xochitl")) fprintf(stderr, "restart failed\n"); }
+    restart_xochitl();
 }
 
 /* ---------- the Words page: loops done, lessons made ---------- */

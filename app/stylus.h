@@ -200,13 +200,18 @@ static void hover(long us) {   /* pen in proximity, not touching, for `us` micro
  * (translation line) means nothing is open. Both must agree before every stroke. */
 static const char *watched_doc = NULL;
 static int doc_running = 0, page_lost = 0, screen_off = 0;
+static int workers = 0;             /* documents xochitl currently has a worker for, from its journal */
+static time_t workers_quiet_at;     /* when the last one exited: xochitl is done winding documents down */
 static int jfd = -1; static FILE *jf = NULL; static char jbuf[4096]; static size_t jlen = 0;
 
 static void journal_line(const char *line) {
     const char *p = strstr(line, "worker on ");
-    if (p && strstr(p, "now running")) doc_running = strncmp(p + 10, watched_doc, 36) == 0;
-    else if (p && strstr(p, "now exiting")) { if (!strncmp(p + 10, watched_doc, 36)) doc_running = 0; }
-    else if (strstr(line, "Activated translation")) { doc_running = 0; screen_off = 0; }   /* xochitl (re)started */
+    if (p && strstr(p, "now running")) { doc_running = strncmp(p + 10, watched_doc, 36) == 0; workers++; }
+    else if (p && strstr(p, "now exiting")) {
+        if (!strncmp(p + 10, watched_doc, 36)) doc_running = 0;
+        if (--workers <= 0) { workers = 0; workers_quiet_at = time(NULL); }
+    }
+    else if (strstr(line, "Activated translation")) { doc_running = 0; screen_off = 0; workers = 0; workers_quiet_at = time(NULL); }   /* xochitl (re)started */
     else if ((p = strstr(line, "Changing display state from "))) screen_off = strstr(p, " to Normal") == NULL;
 }
 
@@ -239,13 +244,31 @@ static int page_on_screen(void) {
     return doc_running && doc_open(watched_doc);
 }
 
-#define HOME_QUIET_S 180   /* a restart of xochitl waits this long after the last document was closed */
+#define WORKER_SETTLE_S 20   /* a restart of xochitl waits this long after the last document worker exited */
 static long mtime(const char *path);
-/* No document open (LastOpen=@ByteArray()), and for a while: xochitl rewrites its config when a document
- * opens or closes, so the config's age is the time since the last close. A `systemctl restart xochitl`
- * right after a document closed found xochitl still busy with it once and made it crash on the way down
- * (SIGSEGV), and a crashed xochitl reboots the whole tablet (remarkable-fail.service). So our restarts
- * (a rebuilt document, a swapped page) wait until the home screen has been quiet for HOME_QUIET_S. */
+/* A `systemctl restart xochitl` right after a document closed found xochitl still busy with it once and
+ * made it crash on the way down (SIGSEGV), and a crashed xochitl reboots the whole tablet
+ * (remarkable-fail.service). "Still busy" is a thing xochitl prints: its journal says when each document's
+ * worker exits, so we wait WORKER_SETTLE_S past the last one. The age of the config was a blind stand-in
+ * for that, and at the 180 s it needed it never came true on a tablet in use -- measured gaps between one
+ * document closing and the next opening are 2-72 s, so nothing that waits for this ever ran. */
+static int workers_quiet(void) { return !workers && time(NULL) - workers_quiet_at >= WORKER_SETTLE_S; }
+
+/* xochitl 3.28 segfaults in its own teardown often enough to matter: measured on an idle tablet with
+ * nothing open, it ran its whole clean shutdown ("threads stopped", "shutting down...") and dumped core
+ * anyway. systemd then starts OnFailure=remarkable-fail.service, which for a device with no pending
+ * firmware update does one thing -- `systemctl reboot`. xochitl's own Restart=on-failure brings it back
+ * without that, so the reboot buys nothing and costs the user their session. We cannot fix the crash, so
+ * the reboot is taken out of the way for the seconds our restart takes; the unmask is detached so it
+ * happens even if we are killed in between. */
+static void restart_xochitl(void) {
+    if (getenv("RM_FIXTURES")) return;
+    if (system("systemctl mask remarkable-fail.service >/dev/null 2>&1;"
+               " (sleep 25; systemctl unmask remarkable-fail.service) >/dev/null 2>&1 &")) { }
+    if (system("systemctl restart xochitl")) fprintf(stderr, "restart failed\n");
+}
+
+/* No document open (LastOpen=@ByteArray()) and xochitl done with the last one. */
 static int home_screen(void) {
     FILE *f = fopen(CONF, "r");
     if (!f) return 0;
@@ -255,7 +278,7 @@ static int home_screen(void) {
     fclose(f);
     if (!home) return 0;
     if (getenv("RM_FIXTURES")) return 1;
-    return time(NULL) - mtime(CONF) >= HOME_QUIET_S;
+    return workers_quiet();
 }
 
 /* A second safe moment, and in practice the only one that comes: the screen is off. xochitl announces
@@ -264,11 +287,11 @@ static int home_screen(void) {
  * cancels that, leaving us all the time we need with nobody watching. Whatever document is open is
  * reloaded and xochitl restores it, so the cost is a redraw the user does not see.
  * Without this the home screen alone is unreachable for a tablet that is parked on one document: measured
- * gaps between closing one document and opening the next were 2-72 s, never HOME_QUIET_S. */
+ * gaps between closing one document and opening the next were 2-72 s, so only sleep is left. */
 static int may_restart(void) {
     journal_poll();
     if (home_screen()) return 1;
-    return screen_off && time(NULL) - mtime(CONF) >= HOME_QUIET_S;
+    return screen_off && workers_quiet();
 }
 
 static int doc_open(const char *doc) {   /* xochitl keeps the open document's uuid in its config, empty on the home screen */

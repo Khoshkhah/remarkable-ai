@@ -85,6 +85,20 @@ def run_ssh(cmd, host=None):
         raise RuntimeError(f"SSH command failed to '{target}': {res.stderr.strip()}")
     return res.stdout
 
+RESTART_XOCHITL = (
+    # xochitl 3.28 segfaults in its own teardown often enough to matter, and systemd answers that with
+    # OnFailure=remarkable-fail.service, which reboots the tablet. xochitl's own Restart=on-failure brings
+    # it back without the reboot, so the reboot is kept out of the way for the seconds the restart takes
+    # (the unmask is detached, so it happens even if the connection drops).
+    "systemctl mask remarkable-fail.service >/dev/null 2>&1;"
+    " (sleep 25; systemctl unmask remarkable-fail.service) >/dev/null 2>&1 &"
+    " systemctl restart xochitl"
+)
+
+def restart_xochitl(host=None):
+    """Restart xochitl so it notices what was written under it, without risking a reboot."""
+    run_ssh(RESTART_XOCHITL, host=host)
+
 def run_ssh_retry(cmd, host=None, tries=8, delay=5):
     """run_ssh that waits out the moment after `systemctl restart xochitl`, when the tablet drops connections."""
     for i in range(tries):
@@ -755,7 +769,7 @@ def cmd_push(args):
     if getattr(args, "fresh", False):   # drop the pen layer: strokes drawn on an earlier version of this page
         run_ssh(f"rm -f {REMOTE_PATH}/{doc_uuid}/*.rm", host=target_host)
     print("🔄 Refreshing tablet library...")
-    run_ssh("systemctl restart xochitl", host=target_host)
+    restart_xochitl(target_host)
     folder_msg = f" in folder '{folder_name}'" if folder_name else ""
     print(f"✅ Successfully uploaded '{title}' to reMarkable{folder_msg}!")
     return doc_uuid
@@ -1587,7 +1601,7 @@ def install_clock_app(host, clock, doc_title, interval, fmt):
         doc_uuid = doc["uuid"]
         if doc["folder"].lower() != CLOCK_FOLDER:   # an existing document of that name: move it into the folder
             folder_uuid = ensure_remote_folder(CLOCK_FOLDER, host=host)
-            run_ssh(f"sed -i 's/\"parent\": \"[^\"]*\"/\"parent\": \"{folder_uuid}\"/' {REMOTE_PATH}/{doc_uuid}.metadata && systemctl restart xochitl", host=host)
+            run_ssh(f"sed -i 's/\"parent\": \"[^\"]*\"/\"parent\": \"{folder_uuid}\"/' {REMOTE_PATH}/{doc_uuid}.metadata && " + RESTART_XOCHITL, host=host)
             print(f"📁 Moved '{doc_title}' into the '{CLOCK_FOLDER}' folder (the tablet reloads once)")
     content = json.loads(run_ssh_retry(f"cat {REMOTE_PATH}/{doc_uuid}.content", host=host))
     pages = content.get("cPages", {}).get("pages") or content.get("pages") or []
@@ -3384,7 +3398,7 @@ def cmd_dashboard(args):
             run_ssh("test -f /usr/share/remarkable/suspended.png.original && cp /usr/share/remarkable/suspended.png.original /usr/share/remarkable/suspended.png", host=target_host)
             print("Successfully restored original sleep screen!")
             if getattr(args, "restart_xochitl", False):
-                run_ssh("systemctl restart xochitl", host=target_host)
+                restart_xochitl(target_host)
                 print("Restarted xochitl.")
             if getattr(args, "suspend", False):
                 run_ssh("systemctl suspend", host=target_host)
@@ -3527,7 +3541,7 @@ def cmd_dashboard(args):
 
         if getattr(args, "restart_xochitl", False):
             print("Restarting xochitl service...")
-            run_ssh("systemctl restart xochitl", host=target_host)
+            restart_xochitl(target_host)
 
         if getattr(args, "suspend", False):
             print("Suspending tablet now to display dashboard immediately on E-ink screen...")
