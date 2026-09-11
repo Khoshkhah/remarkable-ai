@@ -26,6 +26,7 @@
 
 #define RM_PEN_FINELINER 17
 #define RM_PEN_MARKER    16
+#define RM_PEN_BALLPOINT 15
 #define RM_COLOR_BLACK    0
 #define RM_COLOR_GRAY     1
 #define RM_COLOR_WHITE    2

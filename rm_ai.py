@@ -3059,7 +3059,7 @@ def _card_font(kind):
     return path if path and os.path.exists(path) else None
 
 def _handy(points, amp=1.6, seed=7):
-    """A polyline nudged off true, so a drawn frame looks drawn rather than plotted."""
+    """A polyline nudged off true, so a drawn line looks drawn rather than plotted."""
     import random
     r = random.Random(seed)
     dx = dy = 0.0
@@ -3068,6 +3068,31 @@ def _handy(points, amp=1.6, seed=7):
         dx = max(-amp, min(amp, dx + r.uniform(-amp, amp) / 2))
         dy = max(-amp, min(amp, dy + r.uniform(-amp, amp) / 2))
         out.append((x + dx, y + dy))
+    return out
+
+def handy_box(x, y, w, h, seed=7):
+    """A box as someone draws one: four strokes, not a rectangle. Each runs past the corner it ends at,
+    bows a little away from true, and starts and stops where the hand did -- which is what makes the
+    corners cross instead of meet."""
+    import random
+    r = random.Random(seed)
+    sides = [((x, y), (x + w, y)), ((x + w, y), (x + w, y + h)),
+             ((x + w, y + h), (x, y + h)), ((x, y + h), (x, y))]
+    out = []
+    for (x0, y0), (x1, y1) in sides:
+        ln = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = (x1 - x0) / ln, (y1 - y0) / ln       # along the side, and across it
+        nx, ny = -uy, ux
+        back, over = r.uniform(6, 16), r.uniform(8, 22)   # before the start, past the end
+        bow = r.choice((-1, 1)) * r.uniform(4, 8)         # how far the middle drifts off true
+        tilt = r.uniform(-4, 4)                           # the far end a little high or low
+        pts = []
+        for i in range(19):
+            t = i / 18
+            d = -back + t * (ln + back + over)
+            off = bow * math.sin(math.pi * t) + tilt * t + r.uniform(-0.8, 0.8)
+            pts.append((x0 + ux * d + nx * off, y0 + uy * d + ny * off))
+        out.append(pts)
     return out
 
 def card_strokes(card, box, dark=False):
@@ -3086,11 +3111,9 @@ def card_strokes(card, box, dark=False):
     for yy in range(int(y + 4), int(y + h - 2), 4):
         out.append(rm_stroke([(x + 6, yy), (x + w - 6, yy)], tool=si.Pen.MARKER_2, width=4.0, color=field))
 
-    # a frame drawn inside the field, twice round and slightly off true both times
-    out.append(rm_stroke(_handy(rounded_rect(x + 12, y + 12, w - 24, h - 24, r=30), seed=3),
-                         tool=si.Pen.FINELINER_2, width=2.4, color=ink))
-    out.append(rm_stroke(_handy(rounded_rect(x + 17, y + 17, w - 34, h - 34, r=25), seed=11),
-                         tool=si.Pen.FINELINER_2, width=1.3, color=ink))
+    # the frame, drawn inside the field the way a hand draws one: four strokes that cross at the corners
+    for pl in handy_box(x + 14, y + 14, w - 28, h - 28, seed=3):
+        out.append(rm_stroke(pl, tool=si.Pen.BALLPOINT_2, width=2.6, color=ink))
 
     # The two languages are told apart by how densely they are filled, not by colour: a gray thin stroke
     # is not a tone an e-ink screen can hold, but ink laid every 3rd row instead of every 2nd, with a
