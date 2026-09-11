@@ -101,7 +101,8 @@ static int read_page(const char *path) {   /* strokes on the page (display px), 
 static int is_ink(int tool) { return tool != 5 && tool != 18 && tool != 6 && tool != 8; }   /* not a highlighter, not an eraser */
 static int is_loop(const struct stroke *s) {   /* is_box() in rm_ai.py: one closed lap around something */
     float w = s->x1 - s->x0, h = s->y1 - s->y0;
-    if (w < 80 || h < 40 || s->n < 8) return 0;
+    if (w < 80 || h < 40 || s->n < 4) return 0;   /* 4: the tablet snaps a drawn loop to a clean shape,
+                                                    and a snapped rectangle is 4 corners and the close */
     if (hypotf(s->p[0].x - s->p[s->n - 1].x, s->p[0].y - s->p[s->n - 1].y) > fmaxf(40, 0.2f * hypotf(w, h))) return 0;
     double len = 0; for (int i = 1; i < s->n; i++) len += hypotf(s->p[i].x - s->p[i - 1].x, s->p[i].y - s->p[i - 1].y);
     double r = len / (2 * (w + h));
@@ -851,7 +852,7 @@ static void card_box(const struct stroke *loop, int *bx, int *by, int *bw, int *
     else *by = PH - 40 - *bh;
 }
 
-static int card_from_loop(const char *page_path, const struct stroke *loop, int *idx, int nc) {
+static int card_from_loop(const struct stroke *loop, int *idx, int nc, struct card *out) {
     unsigned char *png1, *png2; size_t n1, n2;
     loop_pngs(loop, idx, nc, &png1, &n1, &png2, &n2);
     snprintf(prompt, sizeof prompt, "%s\n\nThe learner wrote by hand on a page and drew a loop around a word or phrase. "
@@ -861,21 +862,29 @@ static int card_from_loop(const char *page_path, const struct stroke *loop, int 
     int ok = ask_gemini(prompt, png1, n1, png2, n2, answer, sizeof answer);
     free(png1); free(png2);
     if (!ok) return 0;
-    struct card c;
-    if (!parse_card(answer, &c)) { fprintf(stderr, "no WORD: in the answer\n"); return 0; }
-    int bx, by, bw, bh;
-    card_box(loop, &bx, &by, &bw, &bh);
-    return draw_card(page_path, &c, bx, by, bw, bh);
+    if (!parse_card(answer, out)) { fprintf(stderr, "no WORD: in the answer\n"); return 0; }
+    return 1;
 }
 
-/* Every page of the inline notebook, while it is closed: a loop with ink in it that has no card yet
- * gets one. The page file is only ever appended to, so the handwriting on it is untouched. */
-static void inline_poll(void) {
-    if (!inline_doc[0] || !idir[0]) return;
-    if (doc_open(inline_doc)) return;          /* never write under the page someone is looking at */
+/* Asking the teacher and drawing the card want opposite things. The asking can happen while the notebook
+ * is open -- it only reads -- and the drawing cannot, since xochitl writes its own copy of an open page
+ * over ours. So a circled word is sent off straight away and the answer waits here; the moment the
+ * notebook is closed the card is drawn, and it is there when the page is opened again. Nothing could
+ * appear sooner in any case: xochitl reads a page from disk when it opens it. */
+struct pending { struct card c; char page[72]; struct sig g; int bx, by, bw, bh; };
+static struct pending pend[8];
+static int npend;
+
+static int is_pending(const char *page, struct sig g) {
+    for (int i = 0; i < npend; i++) if (!strcmp(pend[i].page, page) && same_sig(pend[i].g, g)) return 1;
+    return 0;
+}
+
+/* every page of the notebook: a loop with ink in it and no card yet, and no answer already waiting */
+static void inline_ask(void) {
     DIR *dp = opendir(idir); if (!dp) return;
     struct dirent *e;
-    while ((e = readdir(dp))) {
+    while ((e = readdir(dp)) && npend < 8) {
         size_t l = strlen(e->d_name);
         if (l < 4 || strcmp(e->d_name + l - 3, ".rm")) continue;
         char path[700]; snprintf(path, sizeof path, "%s/%s", idir, e->d_name);
@@ -888,24 +897,43 @@ static void inline_poll(void) {
             if (!nc || nc > 400) continue;                        /* a circled word is a few strokes, not a card */
             struct sig g = sig_of(&strokes[i]);
             time_t now = time(NULL);
-            if (idone_has(e->d_name, g) || retry_at(g) > now) continue;
+            if (idone_has(e->d_name, g) || is_pending(e->d_name, g) || retry_at(g) > now) continue;
             fprintf(stderr, "inline loop at %d,%d-%d,%d on %.8s with %d strokes inside: asking Gemini\n",
                     g.x0, g.y0, g.x1, g.y1, e->d_name, nc);
-            if (card_from_loop(path, &strokes[i], idx, nc)) {
-                if (nidone < 512) {
-                    idone[nidone].s = g; idone[nidone].node = card_last_node;
-                    snprintf(idone[nidone].page, sizeof idone[nidone].page, "%s", e->d_name);
-                    nidone++;
-                }
-                isave();
-            } else {
+            struct pending *p = &pend[npend];
+            if (!card_from_loop(&strokes[i], idx, nc, &p->c)) {
                 fprintf(stderr, "no card this time, trying again in %d s\n", RETRY_S);
                 set_failed(g, now + RETRY_S);
+            } else {
+                card_box(&strokes[i], &p->bx, &p->by, &p->bw, &p->bh);
+                snprintf(p->page, sizeof p->page, "%s", e->d_name);
+                p->g = g;
+                npend++;
+                fprintf(stderr, "card for '%s' ready; it is drawn when the notebook is closed\n", p->c.word);
             }
-            break;                              /* one card a round: the page has changed under us */
+            break;                              /* one at a time: the page has changed under us */
         }
     }
     closedir(dp);
+}
+
+static void inline_draw(void) {                 /* the part that needs the notebook closed */
+    while (npend > 0) {
+        char path[700]; snprintf(path, sizeof path, "%s/%s", idir, pend[0].page);
+        if (draw_card(path, &pend[0].c, pend[0].bx, pend[0].by, pend[0].bw, pend[0].bh) && nidone < 512) {
+            idone[nidone].s = pend[0].g; idone[nidone].node = card_last_node;
+            snprintf(idone[nidone].page, sizeof idone[nidone].page, "%s", pend[0].page);
+            nidone++;
+            isave();
+        }
+        memmove(&pend[0], &pend[1], (size_t)(--npend) * sizeof pend[0]);
+    }
+}
+
+static void inline_poll(void) {
+    if (!inline_doc[0] || !idir[0]) return;
+    inline_ask();
+    if (!doc_open(inline_doc)) inline_draw();
 }
 
 static void check_mark(const struct stroke *loop) {   /* a tick beside the loop: the lesson is made */
