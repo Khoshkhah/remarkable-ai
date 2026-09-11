@@ -3058,28 +3058,43 @@ def _card_font(kind):
     path = CARD_FONTS.get("english" if kind == "farsi_tone" else kind)
     return path if path and os.path.exists(path) else None
 
+def _handy(points, amp=1.6, seed=7):
+    """A polyline nudged off true, so a drawn frame looks drawn rather than plotted."""
+    import random
+    r = random.Random(seed)
+    dx = dy = 0.0
+    out = []
+    for x, y in points:                                # a slow wander, not per-point noise
+        dx = max(-amp, min(amp, dx + r.uniform(-amp, amp) / 2))
+        dy = max(-amp, min(amp, dy + r.uniform(-amp, amp) / 2))
+        out.append((x + dx, y + dy))
+    return out
+
 def card_strokes(card, box, dark=False):
-    """A flashcard drawn as strokes: a black field laid down with the marker and the writing in white on
-    top of it, inside the clock's rounded frame. `card` is the dict the teacher returns; missing lines are
-    simply left out. `dark=False` gives the plain version, ink on the page's own white."""
+    """A flashcard drawn as strokes. The card is opaque: the white marker paints the whole box first, so
+    it covers whatever is written under it, and the frame and the writing go on top. `card` is the dict
+    the teacher returns; missing lines are simply left out. `dark=True` paints the box black instead and
+    writes in white."""
     import rmscene.scene_items as si
     x, y, w, h = box
     ink = si.PenColor.WHITE if dark else si.PenColor.BLACK
+    field = si.PenColor.BLACK if dark else si.PenColor.WHITE
     out = []
 
-    if dark:
-        # the field: marker passes at a quarter of the marker's own width, so no page shows between them
-        for yy in range(int(y + 5), int(y + h - 3), 4):
-            out.append(rm_stroke([(x + 8, yy), (x + w - 8, yy)], tool=si.Pen.MARKER_2, width=4.0))
+    # the card's own background, laid down with the marker at a quarter of its own width so nothing of
+    # the page -- or of the handwriting on it -- shows through
+    for yy in range(int(y + 4), int(y + h - 2), 4):
+        out.append(rm_stroke([(x + 6, yy), (x + w - 6, yy)], tool=si.Pen.MARKER_2, width=4.0, color=field))
 
-    out.append(rm_stroke(rounded_rect(x, y, w, h, r=34), tool=si.Pen.FINELINER_2, width=3.0,
-                         color=si.PenColor.BLACK))
-    out.append(rm_stroke(rounded_rect(x + 9, y + 9, w - 18, h - 18, r=28), tool=si.Pen.FINELINER_2,
-                         width=1.6, color=ink))
+    # a frame drawn inside the field, twice round and slightly off true both times
+    out.append(rm_stroke(_handy(rounded_rect(x + 12, y + 12, w - 24, h - 24, r=30), seed=3),
+                         tool=si.Pen.FINELINER_2, width=2.4, color=ink))
+    out.append(rm_stroke(_handy(rounded_rect(x + 17, y + 17, w - 34, h - 34, r=25), seed=11),
+                         tool=si.Pen.FINELINER_2, width=1.3, color=ink))
 
     # The two languages are told apart by how densely they are filled, not by colour: a gray thin stroke
-    # on a black field is not a tone an e-ink screen can hold, but ink laid every 3rd row instead of every
-    # 2nd, with a finer pen, reads as clearly lighter and still white.
+    # is not a tone an e-ink screen can hold, but ink laid every 3rd row instead of every 2nd, with a
+    # finer pen, reads as clearly lighter.
     def put(text, size, ty, kind, rtl=False):
         if not text:
             return
@@ -3093,16 +3108,16 @@ def card_strokes(card, box, dark=False):
 
     top = y + CARD_PAD - 8
     put(card.get("word"), 76, top, "word")
-    put(card.get("definition"), 40, top + 104, "english")
-    put(card.get("meaning"), 40, top + 158, "farsi", rtl=True)
+    put(card.get("definition"), 40, top + 116, "english")
+    put(card.get("meaning"), 40, top + 172, "farsi", rtl=True)
 
-    rule = top + 224                                   # a hairline between the sense and the sample
-    out.append(rm_stroke([(x + CARD_PAD, rule), (x + w - CARD_PAD, rule)], tool=si.Pen.FINELINER_2,
-                         width=1.2, color=ink))
+    rule = top + 236                                   # a hairline between the sense and the sample
+    out.append(rm_stroke(_handy([(x + CARD_PAD, rule), (x + w - CARD_PAD, rule)], amp=1.0, seed=5),
+                         tool=si.Pen.FINELINER_2, width=1.2, color=ink))
 
-    put(card.get("sample"), 40, rule + 26, "sample")
-    put(card.get("translation"), 38, rule + 80, "farsi", rtl=True)
-    put(("~ " + card["similar"]) if card.get("similar") else None, 36, rule + 146, "farsi_tone")
+    put(card.get("sample"), 40, rule + 30, "sample")
+    put(card.get("translation"), 40, rule + 86, "farsi", rtl=True)
+    put(("~ " + card["similar"]) if card.get("similar") else None, 36, rule + 150, "farsi_tone")
     return out
 
 def _text_width(text, size, bold=False, font_path=None):

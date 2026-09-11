@@ -474,6 +474,22 @@ static int parse_card(const char *text, struct card *c) {
     return c->word[0] != 0;
 }
 
+/* a slow wander off true, so a drawn frame looks drawn rather than plotted (deterministic: the same
+ * card drawn twice comes out the same) */
+static void card_handy(struct rmpt *p, int n, float amp, uint32_t seed) {
+    float dx = 0, dy = 0;
+    for (int i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        float a = ((float)((seed >> 16) & 0xffff) / 32768.0f - 1.0f) * amp / 2;
+        seed = seed * 1664525u + 1013904223u;
+        float b = ((float)((seed >> 16) & 0xffff) / 32768.0f - 1.0f) * amp / 2;
+        dx += a; dy += b;
+        if (dx > amp) dx = amp; if (dx < -amp) dx = -amp;
+        if (dy > amp) dy = amp; if (dy < -amp) dy = -amp;
+        p[i].x += dx; p[i].y += dy;
+    }
+}
+
 /* the clock's frame shape */
 static int card_rounded(struct rmpt *out, float x, float y, float w, float h, float r) {
     static const float a0[4] = {-90, 0, 90, 180};
@@ -551,16 +567,20 @@ static int draw_card(const char *rmpath, const struct card *c, int bx, int by, i
     card_prev = 0;
 
     struct rmpt pts[64];
-    if (card_dark)                                          /* the field: passes at a quarter of the marker's width */
-        for (int y = by + 5; y < by + bh - 3; y += 4) {
-            pts[0].x = (float)(bx + 8); pts[0].y = (float)y;
-            pts[1].x = (float)(bx + bw - 8); pts[1].y = (float)y;
-            card_emit(pts, 2, RM_PEN_MARKER, 4.0f, RM_COLOR_BLACK);
-        }
-    int n = card_rounded(pts, (float)bx, (float)by, (float)bw, (float)bh, 34);
-    card_emit(pts, n, RM_PEN_FINELINER, 3.0f, RM_COLOR_BLACK);
-    n = card_rounded(pts, bx + 9.0f, by + 9.0f, bw - 18.0f, bh - 18.0f, 28);
-    card_emit(pts, n, RM_PEN_FINELINER, 1.6f, card_dark ? RM_COLOR_WHITE : RM_COLOR_BLACK);
+    /* the card's own background: the marker at a quarter of its own width, so nothing of the page --
+     * or of the handwriting on it -- shows through. White unless the card is the dark one. */
+    int field = card_dark ? RM_COLOR_BLACK : RM_COLOR_WHITE, ink = card_dark ? RM_COLOR_WHITE : RM_COLOR_BLACK;
+    for (int y = by + 4; y < by + bh - 2; y += 4) {
+        pts[0].x = (float)(bx + 6); pts[0].y = (float)y;
+        pts[1].x = (float)(bx + bw - 6); pts[1].y = (float)y;
+        card_emit(pts, 2, RM_PEN_MARKER, 4.0f, field);
+    }
+    int n = card_rounded(pts, bx + 12.0f, by + 12.0f, bw - 24.0f, bh - 24.0f, 30);
+    card_handy(pts, n, 1.6f, 3);
+    card_emit(pts, n, RM_PEN_FINELINER, 2.4f, ink);
+    n = card_rounded(pts, bx + 17.0f, by + 17.0f, bw - 34.0f, bh - 34.0f, 25);
+    card_handy(pts, n, 1.6f, 11);
+    card_emit(pts, n, RM_PEN_FINELINER, 1.3f, ink);
 
     int left = bx + CARD_PAD, right = bx + bw - CARD_PAD, top = by + CARD_PAD - 8;
     float full = card_dark ? 2.2f : 1.5f, fine = card_dark ? 1.5f : 1.2f;
@@ -569,7 +589,8 @@ static int draw_card(const char *rmpath, const struct card *c, int bx, int by, i
     card_text(c->meaning,     40, 0, left, right, top + 172,  CARD_PITCH + 1, fine);
     int rule = top + 236;
     pts[0].x = (float)left; pts[0].y = (float)rule; pts[1].x = (float)right; pts[1].y = (float)rule;
-    card_emit(pts, 2, RM_PEN_FINELINER, 1.2f, card_dark ? RM_COLOR_WHITE : RM_COLOR_BLACK);
+    card_handy(pts, 2, 1.0f, 5);
+    card_emit(pts, 2, RM_PEN_FINELINER, 1.2f, ink);
     card_text(c->sample,      40, 0, left, right, rule + 30,  CARD_PITCH,     full);
     card_text(c->translation, 40, 0, left, right, rule + 86,  CARD_PITCH + 1, fine);
     if (c->similar[0]) {
