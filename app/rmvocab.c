@@ -474,29 +474,34 @@ static int parse_card(const char *text, struct card *c) {
     return c->word[0] != 0;
 }
 
-/* A box as someone draws one: four strokes, not a rectangle. Each runs past the corner it ends at,
- * bows a little away from true and starts where the hand did, which is what makes the corners cross
- * instead of meet. Deterministic, so the same card redrawn gives the same frame. */
-static uint32_t card_rnd_s;
-static float card_rnd(float lo, float hi) {
-    card_rnd_s = card_rnd_s * 1664525u + 1013904223u;
-    return lo + (hi - lo) * (float)((card_rnd_s >> 8) & 0xffff) / 65535.0f;
-}
-#define CARD_BOX_PTS 19
-static int handy_side(struct rmpt *out, float x0, float y0, float x1, float y1) {
-    float ln = sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
-    if (ln < 1) return 0;
-    float ux = (x1 - x0) / ln, uy = (y1 - y0) / ln, nx = -uy, ny = ux;
-    float back = card_rnd(6, 16), over = card_rnd(8, 22);
-    float bow = (card_rnd(0, 1) < 0.5f ? -1.0f : 1.0f) * card_rnd(4, 8), tilt = card_rnd(-4, 4);
-    for (int i = 0; i < CARD_BOX_PTS; i++) {
-        float t = (float)i / (CARD_BOX_PTS - 1);
-        float d = -back + t * (ln + back + over);
-        float off = bow * sinf((float)M_PI * t) + tilt * t + card_rnd(-0.8f, 0.8f);
-        out[i].x = x0 + ux * d + nx * off;
-        out[i].y = y0 + uy * d + ny * off;
+/* a slow wander off true, so a drawn frame looks drawn rather than plotted (deterministic: the same
+ * card drawn twice comes out the same) */
+static void card_handy(struct rmpt *p, int n, float amp, uint32_t seed) {
+    float dx = 0, dy = 0;
+    for (int i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        float a = ((float)((seed >> 16) & 0xffff) / 32768.0f - 1.0f) * amp / 2;
+        seed = seed * 1664525u + 1013904223u;
+        float b = ((float)((seed >> 16) & 0xffff) / 32768.0f - 1.0f) * amp / 2;
+        dx += a; dy += b;
+        if (dx > amp) dx = amp; if (dx < -amp) dx = -amp;
+        if (dy > amp) dy = amp; if (dy < -amp) dy = -amp;
+        p[i].x += dx; p[i].y += dy;
     }
-    return CARD_BOX_PTS;
+}
+
+/* the clock's frame shape */
+static int card_rounded(struct rmpt *out, float x, float y, float w, float h, float r) {
+    static const float a0[4] = {-90, 0, 90, 180};
+    const float cx[4] = {x + w - r, x + w - r, x + r, x + r}, cy[4] = {y + r, y + h - r, y + h - r, y + r};
+    int n = 0;
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < 7; i++) {
+            float a = (a0[k] + 90.0f * i / 6) * (float)M_PI / 180.0f;
+            out[n].x = cx[k] + r * cosf(a); out[n].y = cy[k] + r * sinf(a); n++;
+        }
+    out[n] = out[0]; n++;
+    return n;
 }
 
 static int card_dark = 0;        /* a black field with the writing in white; off, the page's own white */
@@ -570,14 +575,12 @@ static int draw_card(const char *rmpath, const struct card *c, int bx, int by, i
         pts[1].x = (float)(bx + bw - 6); pts[1].y = (float)y;
         card_emit(pts, 2, RM_PEN_MARKER, 4.0f, field);
     }
-    card_rnd_s = 3;                                          /* the frame: four strokes that cross */
-    const float fx = bx + 14.0f, fy = by + 14.0f, fw = bw - 28.0f, fh = bh - 28.0f;
-    const float sx[4] = {fx, fx + fw, fx + fw, fx}, sy[4] = {fy, fy, fy + fh, fy + fh};
-    const float ex[4] = {fx + fw, fx + fw, fx, fx}, ey[4] = {fy, fy + fh, fy + fh, fy};
-    for (int k = 0; k < 4; k++) {
-        int n = handy_side(pts, sx[k], sy[k], ex[k], ey[k]);
-        if (n) card_emit(pts, n, RM_PEN_BALLPOINT, 2.6f, ink);
-    }
+    int n = card_rounded(pts, bx + 12.0f, by + 12.0f, bw - 24.0f, bh - 24.0f, 30);
+    card_handy(pts, n, 1.6f, 3);
+    card_emit(pts, n, RM_PEN_FINELINER, 2.4f, ink);
+    n = card_rounded(pts, bx + 17.0f, by + 17.0f, bw - 34.0f, bh - 34.0f, 25);
+    card_handy(pts, n, 1.6f, 11);
+    card_emit(pts, n, RM_PEN_FINELINER, 1.3f, ink);
 
     int left = bx + CARD_PAD, right = bx + bw - CARD_PAD, top = by + CARD_PAD - 8;
     float full = card_dark ? 2.2f : 1.5f, fine = card_dark ? 1.5f : 1.2f;
@@ -585,9 +588,9 @@ static int draw_card(const char *rmpath, const struct card *c, int bx, int by, i
     card_text(c->definition,  40, 0, left, right, top + 116,  CARD_PITCH,     full);
     card_text(c->meaning,     40, 0, left, right, top + 172,  CARD_PITCH + 1, fine);
     int rule = top + 236;
-    card_rnd_s = 5;
-    { int n = handy_side(pts, (float)left, (float)rule, (float)right, (float)rule);
-      if (n) card_emit(pts, n, RM_PEN_FINELINER, 1.2f, ink); }
+    pts[0].x = (float)left; pts[0].y = (float)rule; pts[1].x = (float)right; pts[1].y = (float)rule;
+    card_handy(pts, 2, 1.0f, 5);
+    card_emit(pts, 2, RM_PEN_FINELINER, 1.2f, ink);
     card_text(c->sample,      40, 0, left, right, rule + 30,  CARD_PITCH,     full);
     card_text(c->translation, 40, 0, left, right, rule + 86,  CARD_PITCH + 1, fine);
     if (c->similar[0]) {
