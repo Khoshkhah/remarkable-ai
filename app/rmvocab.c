@@ -501,9 +501,9 @@ static void touch_metadata(const char *base) {   /* lastModified = now, so the l
     free(m);
 }
 static int page_loops = 0, ndone = 0;
-static void rebuild_if_due(void) {   /* the document gets every lesson so far, while nothing is open on the tablet */
+static void rebuild_if_due(void) {   /* the document gets every lesson so far, at a moment a restart costs nothing */
     int have = lessons_count(); char v[32]; int pushed = read_kv("state", "pushed", v, sizeof v) ? atoi(v) : -1;
-    if (!have || have == pushed || !home_screen()) return;
+    if (!have || have == pushed || !may_restart()) return;
     char base[600], tmp[700]; snprintf(base, sizeof base, "%.*s", (int)(strlen(pdfpath) - 4), pdfpath); snprintf(tmp, sizeof tmp, "%s.new", pdfpath);
     int pages = build_pdf(tmp);
     if (!pages || rename(tmp, pdfpath)) { fprintf(stderr, "could not build the Vocabulary document\n"); unlink(tmp); return; }

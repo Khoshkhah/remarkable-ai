@@ -1630,7 +1630,7 @@ GLYPH_BASE = (300, 300)   # every glyph is baked with its text origin here; rmda
 # app/rmdash.c reads as `layout`; zones are erased whole when a value in them changes; texts are
 # (font size, x, y) of a text origin.
 TABLET_DASH_LAYOUT = {
-    "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 535, 1185), "row1": (95, 1186, 535, 1375), "row2": (95, 1376, 535, 1565)},
+    "zones": {"clock": LIVE_CLOCK_ZONE, "row0": (95, 996, 560, 1185), "row1": (95, 1186, 560, 1375), "row2": (95, 1376, 560, 1565)},
     "texts": {"clock": (190, 80, 115), "pct0": (110, 105, 1045), "reset0": (40, 335, 1058), "pct1": (110, 105, 1235), "reset1": (40, 335, 1248),
               "pct2": (110, 105, 1425), "reset2": (40, 335, 1438)},
     "bars": [(LIVE_BAR_X[0], LIVE_BAR_X[1], y + 13) for y in LIVE_USAGE_ROWS],
@@ -1912,6 +1912,11 @@ def install_dash_app(host, city, token_file, tasks=None, doc_title="Dashboard", 
     if token_file:
         creds = json.load(open(os.path.expanduser(token_file)))["claudeAiOauth"]
         token = f"access={creds['accessToken']}\nrefresh={creds['refreshToken']}\nexpires={int(creds.get('expiresAt', 0)) // 1000}\n"
+        # the tablet renews its token itself and a renewal invalidates the older pair: never ship a staler copy
+        tablet_expires = run_ssh(f"sed -n 's/^expires=//p' {TABLET_DASH_DIR}/token 2>/dev/null; true", host=host).strip()
+        if tablet_expires.isdigit() and int(tablet_expires) >= int(creds.get("expiresAt", 0)) // 1000:
+            print("🔑 The tablet's own Claude login is newer than the file given: keeping it", flush=True)
+            token = None
     run_ssh("systemctl stop rmdash 2>/dev/null; true", host=host)   # never push (the app restarts) under a running program
     existing = next((nb["uuid"] for nb in list_notebooks(host) if nb["title"].lower() == doc_title.lower() and nb["folder"].lower() == CLOCK_FOLDER), None)
     stock = Path(tempfile.mkdtemp())
@@ -2531,7 +2536,7 @@ def render_dashboard_image(battery_info=(None, None), tasks=None, quote=None, ha
 
     return im
 
-def sweep_path(x0, y0, x1, y1, lane=14):
+def sweep_path(x0, y0, x1, y1, lane=SWEEP_LANE):
     """One serpentine eraser path over a rectangle: vertical lanes `lane` px apart (the eraser is ~17 px wide)."""
     pts = []
     for i, x in enumerate(range(int(x0), int(x1) + 1, lane)):
@@ -2643,7 +2648,7 @@ def run_live_dashboard(host, usage_minutes, doc_uuid, repush=None):
             stylus.stroke(sweep_path(*LIVE_CLOCK_ZONE), is_eraser=True, pressure=4000)
         for i in changed_rows:
             y = LIVE_USAGE_ROWS[i]
-            stylus.stroke(sweep_path(95, y - 4, 535, y + 185), is_eraser=True, pressure=4000)
+            stylus.stroke(sweep_path(95, y - 4, 560, y + 185), is_eraser=True, pressure=4000)
         # 2. let xochitl finish erasing before any pen stroke
         stylus.hover((LIVE_CLOCK_ZONE[0], LIVE_CLOCK_ZONE[1]), DigitalClock.START_SETTLE)
         # 3. all drawing, in the page's font

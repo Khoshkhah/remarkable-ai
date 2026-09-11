@@ -142,6 +142,13 @@ static unsigned char *load(const char *name, size_t *len) {
     unsigned char *buf = malloc(MAXBLOB); *len = fread(buf, 1, MAXBLOB, f); fclose(f); return buf;
 }
 
+/* the page left the screen: give up rather than draw on whatever is open now */
+static int page_gone(void) {
+    if (!page_lost && page_on_screen()) return 0;
+    if (!page_lost) fprintf(stderr, "the page left the screen, stopping mid-draw\n");
+    page_lost = 1; return 1;
+}
+
 /* every stroke in the blob, in order; each retried until it completes with the real pen away */
 static void play_blob(const unsigned char *blob, size_t len, int eraser, int32_t ox, int32_t oy, int32_t xmax) {
     const struct ev *ev = (const struct ev *)blob;
@@ -149,16 +156,14 @@ static void play_blob(const unsigned char *blob, size_t len, int eraser, int32_t
     int tool_code = eraser ? BTN_TOOL_RUBBER : BTN_TOOL_PEN;
     for (size_t i = 0; i < n; i++) {
         if (!(ev[i].type == EV_KEY && ev[i].code == tool_code && ev[i].value == 0)) continue;
-        if (page_lost || !page_on_screen()) {                 /* never a single stroke on another page */
-            if (!page_lost) fprintf(stderr, "the page left the screen, stopping mid-draw\n");
-            page_lost = 1; return;
-        }
+        if (page_gone()) return;                              /* never a single stroke on another page */
         size_t end = i + 1;                                   /* the stroke ends with the tool leaving proximity ... */
         while (end < n && ev[end].type != EV_SYN) end++;      /* ... and that frame's SYN */
         if (end < n) end++;
-        while (1) {
-            while (pen_near()) nap(100000);
+        while (1) {                                           /* waiting out the real pen can outlast the page: check every round */
+            while (pen_near()) { if (page_gone()) return; nap(100000); }
             if (play_stroke(ev + start, end - start, eraser, ox, oy, xmax)) break;
+            if (page_gone()) return;
             fprintf(stderr, "stroke interrupted, redrawing\n");
         }
         start = i = end;
@@ -167,10 +172,11 @@ static void play_blob(const unsigned char *blob, size_t len, int eraser, int32_t
 }
 
 /* a baked file, shifted by (dx, dy) display px; missing files are skipped. Returns 1 if it existed. */
+static int dry = 0;   /* stroke_file() only reports whether the file exists, nothing is sent (rmdash's bookkeeping) */
 static int stroke_file(const char *name, int eraser, int dx, int dy, int xmax_px) {
     size_t len; unsigned char *blob = load(name, &len);
     if (!blob) return 0;
-    play_blob(blob, len, eraser, units_x(dx), units_y(dy), xmax_px < 0 ? -1 : units_x(xmax_px));
+    if (!dry) play_blob(blob, len, eraser, units_x(dx), units_y(dy), xmax_px < 0 ? -1 : units_x(xmax_px));
     free(blob);
     return 1;
 }
@@ -193,14 +199,15 @@ static void hover(long us) {   /* pen in proximity, not touching, for `us` micro
  * running" while a document is open in the editor, "now exiting" when it closes, and a fresh start
  * (translation line) means nothing is open. Both must agree before every stroke. */
 static const char *watched_doc = NULL;
-static int doc_running = 0, page_lost = 0;
+static int doc_running = 0, page_lost = 0, screen_off = 0;
 static int jfd = -1; static FILE *jf = NULL; static char jbuf[4096]; static size_t jlen = 0;
 
 static void journal_line(const char *line) {
     const char *p = strstr(line, "worker on ");
     if (p && strstr(p, "now running")) doc_running = strncmp(p + 10, watched_doc, 36) == 0;
     else if (p && strstr(p, "now exiting")) { if (!strncmp(p + 10, watched_doc, 36)) doc_running = 0; }
-    else if (strstr(line, "Activated translation")) doc_running = 0;   /* xochitl (re)started */
+    else if (strstr(line, "Activated translation")) { doc_running = 0; screen_off = 0; }   /* xochitl (re)started */
+    else if ((p = strstr(line, "Changing display state from "))) screen_off = strstr(p, " to Normal") == NULL;
 }
 
 static void journal_start(const char *doc) {
@@ -249,6 +256,19 @@ static int home_screen(void) {
     if (!home) return 0;
     if (getenv("RM_FIXTURES")) return 1;
     return time(NULL) - mtime(CONF) >= HOME_QUIET_S;
+}
+
+/* A second safe moment, and in practice the only one that comes: the screen is off. xochitl announces
+ * every display state change ("Changing display state from Normal to DeepSleep") and goes to sleep about
+ * 12 s later, so the window looks short -- but xochitl is what asks the kernel to suspend, and stopping it
+ * cancels that, leaving us all the time we need with nobody watching. Whatever document is open is
+ * reloaded and xochitl restores it, so the cost is a redraw the user does not see.
+ * Without this the home screen alone is unreachable for a tablet that is parked on one document: measured
+ * gaps between closing one document and opening the next were 2-72 s, never HOME_QUIET_S. */
+static int may_restart(void) {
+    journal_poll();
+    if (home_screen()) return 1;
+    return screen_off && time(NULL) - mtime(CONF) >= HOME_QUIET_S;
 }
 
 static int doc_open(const char *doc) {   /* xochitl keeps the open document's uuid in its config, empty on the home screen */

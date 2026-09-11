@@ -208,7 +208,7 @@ static void want_all(char want[NZ][512], struct tm *lt) {
 }
 
 /* draw a zone's content, or with `eraser` take exactly that content out again (the same strokes, run
- * with the eraser twins): this is how a zone is cleared before its new content, precise and quick */
+ * with the eraser twins; the cycle only uses this with `dry` set, to count the strokes a sweep removes) */
 static void draw_zone(int z, const char *want, struct tm *lt, int eraser) {
     char buf[512]; strncpy(buf, want, sizeof buf - 1); buf[511] = 0;
     if (z == 0) draw_at("clock", buf, 0, eraser);
@@ -490,8 +490,9 @@ static int compose_page(const char *jpg, const char *out) {
 }
 
 /* The printed part of the page (date, calendar) is a stock of PDFs the installer left, one per day:
- * on a new day, while nothing is open on the tablet, today's page replaces the document's PDF and
- * xochitl is restarted so it shows it. The pen strokes on the page are kept: they belong to the .rm. */
+ * on a new day, at a moment a restart costs nothing (may_restart: the home screen, or the screen off),
+ * today's page replaces the document's PDF and xochitl is restarted so it shows it. The pen strokes on
+ * the page are kept: they belong to the .rm. */
 static void swap_daily_page(void) {
     char today[16], printed[64] = "", src[700], tmp[700];
     time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
@@ -501,7 +502,7 @@ static void swap_daily_page(void) {
     long printed_at = 0; char pday[16] = ""; sscanf(printed, "%15s %ld", pday, &printed_at);
     int new_day = strcmp(pday, today) != 0, stale = wx.ok && now - printed_at > 6 * 3600 && wx.at > printed_at;
     if (!pdf[0] || (!new_day && !stale)) return;
-    if (!home_screen()) return;                       /* only between documents: the restart reloads the tablet's app */
+    if (!may_restart()) return;                       /* between documents, or with the screen off: the restart reloads what is open */
     snprintf(src, sizeof src, "%s/pages/%s.jpg", dir, today);
     if (access(src, R_OK)) { static int said = 0; if (!said++) fprintf(stderr, "no printed page for %s in the stock\n", today); return; }
     snprintf(tmp, sizeof tmp, "%s.new", pdf);
@@ -511,57 +512,6 @@ static void swap_daily_page(void) {
     if (!getenv("RM_FIXTURES")) system("systemctl restart xochitl");
 }
 
-#define CYCLE_SETTLE_US 1000000   /* pen in the air after a cycle's few erase strokes, before drawing (4 s only after the start-up sweeps) */
-
-/* phase 0: erase what differs between old and new (only those glyphs, along their own strokes); phase 1: draw
- * what differs. Texts of a different length are redone whole, since the glyph positions shift. */
-static void update_text(const char *tname, const char *old, const char *new, int dy, int phase) {
-    struct text *t = T(tname); if (!t) return;
-    int i; for (i = 0; i < ngl && gl[i].size != t->size; i++);
-    if (i == ngl) return;
-    if (!old) old = ""; if (!new) new = "";
-    if (strlen(old) != strlen(new)) {
-        if (phase == 0 && old[0]) draw_text(t->size, t->x, t->y + dy, old, 1);
-        if (phase == 1 && new[0]) draw_text(t->size, t->x, t->y + dy, new, 0);
-        return;
-    }
-    double x = t->x; char one[2] = {0, 0};
-    for (int k = 0; new[k]; k++) {
-        if (old[k] != new[k]) { one[0] = phase ? new[k] : old[k]; if (one[0] != ' ') draw_text(t->size, x, t->y + dy, one, !phase); if (page_lost) return; }
-        x += gl[i].adv[(unsigned char)new[k]];
-    }
-}
-
-static void update_zone(int z, const char *old, const char *new, int phase, struct tm *lt) {
-    if (z == 0) {   /* the time is always taken out whole and written whole, never digit by digit (the user's choice) */
-        struct text *t = T("clock"); if (!t) return;
-        if (phase == 0 && old[0]) draw_text(t->size, t->x, t->y, old, 1);
-        if (phase == 1 && new[0]) draw_text(t->size, t->x, t->y, new, 0);
-        return;
-    }
-    if (z >= 4 && z <= 6) {   /* a usage row: bar, percentage, reset day and time, each only if it changed */
-        int i = z - 4; char ob[64], nb[64], name[20];
-        snprintf(ob, sizeof ob, "%s", old); snprintf(nb, sizeof nb, "%s", new);
-        char *op = strtok(ob, "|"), *od = strtok(NULL, "|"), *oh = strtok(NULL, "|");
-        char *np = strtok(nb, "|"), *nd = strtok(NULL, "|"), *nh = strtok(NULL, "|");
-        int opct = op ? atoi(op) : -1, npct = np ? atoi(np) : -1;
-        if (opct != npct) {
-            int span = bars[i].x1 - bars[i].x0;
-            if (phase == 0 && opct > 0) { snprintf(name, sizeof name, "ebar%d.bin", i); if (stroke_file(name, 1, 0, 0, bars[i].x0 + span * (opct > 100 ? 100 : opct) / 100 + 8)) drawn_total--; }
-            if (phase == 1 && npct > 0) { snprintf(name, sizeof name, "bar%d.bin", i); if (stroke_file(name, 0, 0, 0, bars[i].x0 + span * (npct > 100 ? 100 : npct) / 100)) drawn_total++; }
-            if (page_lost) return;
-        }
-        snprintf(name, sizeof name, "pct%d", i); update_text(name, op, np, 0, phase);
-        if (page_lost) return;
-        snprintf(name, sizeof name, "reset%d", i); struct text *rt = T(name);
-        update_text(name, od, nd, 0, phase);
-        if (page_lost) return;
-        if (rt) update_text(name, oh, nh, (int)(rt->size * 1.15), phase);
-        return;
-    }
-    if (phase == 0 && old[0]) draw_zone(z, old, lt, 1);
-    if (phase == 1 && new[0]) draw_zone(z, new, lt, 0);
-}
 
 static void save_state(char shown[NZ][512], long rm_mtime) {
     char path[600]; snprintf(path, sizeof path, "%s/state", dir);
@@ -622,6 +572,7 @@ int main(int argc, char **argv) {
         if (!active) {
             fprintf(stderr, "dashboard open, starting\n");
             if (!open_device()) { sleep(5); continue; }
+            if (!fetched) { fetch_weather(); fetch_usage(); fetched = time(NULL); sleep_due = 1; }   /* started with the page open: rows need data, or they would be swept blank */
             char saved[32]; int same = read_kv("state", "rm", saved, sizeof saved) && atol(saved) == mtime(rmfile) && atol(saved) != 0;
             for (int z = 0; z < NZ; z++) { char k[24]; snprintf(k, sizeof k, "zone_%s", ZONES[z]); if (!same || !read_kv("state", k, shown[z], 512)) shown[z][0] = 0; }
             drawn_total = same && read_kv("state", "strokes", saved, sizeof saved) ? atol(saved) : 0;
@@ -654,14 +605,20 @@ int main(int argc, char **argv) {
         if (resweep) continue;
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         want_all(want, &lt);
-        int changed[NZ], any = 0, erased = 0;
+        int changed[NZ], any = 0;
         for (int z = 0; z < NZ; z++) { changed[z] = strcmp(want[z], shown[z]) != 0; any |= changed[z]; }
-        for (int z = 0; z < NZ; z++) if (changed[z] && shown[z][0]) { update_zone(z, shown[z], want[z], 0, &lt); erased = 1; if (page_lost) break; }   /* out with what changed, along its own strokes */
-        if (page_lost) continue;
-        if (erased) hover(CYCLE_SETTLE_US);
+        /* zone by zone: swept clean whole, a settle, written whole, then the next zone (the user's choice: a
+         * partial erase along the old strokes left pieces of the Calligraphy pen's wide strokes behind) */
         for (int z = 0; z < NZ; z++) if (changed[z]) {
             long long t0 = now_us(); long f0 = frames_written;
-            update_zone(z, shown[z], want[z], 1, &lt);
+            if (shown[z][0]) {
+                char name[32]; snprintf(name, sizeof name, "sweep_%s.bin", ZONES[z]);
+                dry = 1; draw_zone(z, shown[z], &lt, 1); dry = 0;   /* only the bookkeeping: the sweep takes these strokes out */
+                stroke_file(name, 1, 0, 0, -1);
+                if (page_lost) break;
+                hover(START_SETTLE_US);
+            }
+            draw_zone(z, want[z], &lt, 0);
             if (page_lost) break;
             strcpy(shown[z], want[z]);
             fprintf(stderr, "%s: %s (%.0f s, %ld frames, %.1f ms/frame; %ld strokes of ours on the page)\n", ZONES[z], want[z], (now_us() - t0) / 1e6, frames_written - f0,
@@ -678,6 +635,7 @@ int main(int argc, char **argv) {
             continue;
         }
         if (sleep_due && time(NULL) - slept >= 4 * 60) { compose_sleep(); slept = time(NULL); sleep_due = 0; }
+        swap_daily_page();                                 /* the page is parked open for days: the swap has to happen under it */
         long wait = 60 - (long)(time(NULL) % 60);
         while (wait > 0 && page_on_screen()) { nap(2000000); wait -= 2; }
     }

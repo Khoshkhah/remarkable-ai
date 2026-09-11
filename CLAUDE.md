@@ -134,18 +134,29 @@ to `@ByteArray()` on the home screen) *and* xochitl's journal says the document'
 "translation" line marks a restart). `LastOpen` alone is not enough: for about a minute after
 `systemctl restart xochitl` it still names the document while the home screen shows, and strokes
 sent then tapped a library tile and drew on the user's notes. When the page leaves mid-draw the
-program stops at once (`page_lost`) and redraws everything on the next open. Installers stop the
+program stops at once (`page_lost`) and redraws everything on the next open; the check runs on every
+round of the retry loop (`page_gone()`), not once per stroke - waiting out the real pen can outlast the
+page, and it did: strokes meant for the dashboard landed on a vocabulary page for three minutes. Installers stop the
 services before any push, and `dashboard --install --no-push` reuses the page without a restart. Rebuild with
 `app/build.sh` (Docker, `alpine` arm/v7 image, musl static); the binary is committed. It takes
 `rmclock <dir> [xochitl.conf] [event device]` so a dry run on the PC against a plain file works.
+
+**Restarting xochitl** (a rebuilt document, a swapped page) needs a moment when the reload costs nothing:
+`may_restart()` in `stylus.h` is the home screen quiet for `HOME_QUIET_S` *or* the screen off. A tablet
+parked on one document never reaches the home screen (measured gaps between one document closing and the
+next opening: 2-72 s, never 180), which left the daily page and the Vocabulary document stuck for days.
+The screen is the way in: xochitl logs `Changing display state from Normal to DeepSleep` and asks the
+kernel to suspend ~12 s later, and stopping xochitl cancels that suspend, so the window is as long as
+needed; whatever document is open is reloaded and restored by xochitl, unseen. `rmdash` therefore calls
+`swap_daily_page()` in the open branch too - its page is parked open for days.
 
 **Tablet-resident dashboard** (`dashboard --install`, `app/rmdash.c`, shares `app/stylus.h` with the
 clock). The page: `render_dash_pages()` renders JPEG templates for the next `DASH_STOCK_DAYS` days
 (`render_dashboard_image(live=True, pen_weather=True, now=day)`: everything printed except the weather
 values); rmdash's `compose_page()` writes a one-page PDF (the JPEG as a DCTDecode XObject plus the
 weather block as Helvetica text in the sleep screen's layout, `weather_block()`) and
-`swap_daily_page()` puts it over the document's PDF and restarts xochitl, only while no document is
-open (`home_screen()`), on a new day or when the printed weather is over 6 h old; the first push is the
+`swap_daily_page()` puts it over the document's PDF and restarts xochitl at a moment the restart costs
+nothing (`may_restart()`), on a new day or when the printed weather is over 6 h old; the first push is the
 PC's full page. The pen strokes live in the `.rm` and survive the swap; the PC's standby cron tops the
 template stock up (`top_up_dash_pages`, no reload). The sleep screen: `render_sleep_backgrounds()` renders
 the standby template with `stamp=True` (header text, weather values, usage rows and the footer time
@@ -167,10 +178,11 @@ continuous eraser stroke zigzagging along the glyph's strokes at `ERASE_OFFSETS`
 `ERASE_STEP_PX` 4 px, run 6 px past the ends). Measured: the app removes a point of a stroke only when
 an eraser *sample* falls within a few px of the stroke's centreline (less for wide strokes: 16 px steps
 left pieces of the Calligraphy pen's 50 px strokes, 14 px sweep lanes left slivers of a 27 px ballpoint),
-so sweeps (`SWEEP_LANE` 6 px) are only for a page whose content is unknown. Updates (`update_zone`): the
-time is always erased whole and rewritten whole each minute (the user's choice: a digit-by-digit update
-cannot cope with a partly erased time), rows only where a field changed, all erasing first, then
-`CYCLE_SETTLE_US` (1 s) in the air, then drawing. Data: Open-Meteo directly (in both the idle and the
+so the sweeps use `SWEEP_LANE` 6 px. Updates, zone by zone: a changed
+zone is swept whole (`sweep_<zone>.bin`), then `START_SETTLE_US` (4 s) in the air, then written whole
+(`draw_zone`), and only then the next zone (the user's choice: erasing along the old strokes with the
+eraser twins left pieces of the Calligraphy pen's 50 px strokes, and a digit-by-digit update cannot cope
+with a partly erased time); the twins now only serve the stroke bookkeeping (`dry` in stylus.h). Data: Open-Meteo directly (in both the idle and the
 active branch: the printed page and the sleep screen need it), Claude usage every 5 min either from a
 `token` file (a Claude Code login made for the tablet in another `CLAUDE_CONFIG_DIR`; the program renews
 it with `refresh_claude_token`'s request, and a login cannot be shared: renewal invalidates the other
@@ -222,7 +234,7 @@ else the paragraph's; a Farsi line, `is_rtl`, is right-aligned with runs placed 
 mirrored in R runs), wraps on spaces (`paragraph`) and paginates; glyphs the atlas lacks (emoji) are skipped.
 Each page is one zlib stream `lessons/NNNN-<p>.z` beside `lessons/NNNN.txt` (phrase, context, source, blank,
 lesson). `build_pdf` joins every page into the Vocabulary PDF (FlateDecode gray images) and `rebuild_if_due`,
-only on the home screen and when the lesson count differs from `state`'s `pushed=`, swaps it in with a fresh
+only when `may_restart()` and the lesson count differs from `state`'s `pushed=`, swaps it in with a fresh
 `.content` (page count), drops the document's `.rm` files (handwriting on lesson pages does not survive),
 clears the Words page when every loop on it is done (`done`: loop signatures; a loop erased by hand is
 forgotten), touches `lastModified` and restarts xochitl. A check mark (`check.bin`) is drawn beside a loop
