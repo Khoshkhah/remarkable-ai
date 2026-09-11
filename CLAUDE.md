@@ -271,6 +271,23 @@ made on the PC in tablet form (`local_lessons_for_tablet`: PNG → zlib) and the
 highlighter is the tool). `RM_FIXTURES=<dir>` answers Gemini from `gemini.json` and skips the restart
 (`rmvocab <dir> [xochitl.conf] [event device]`; `journalctl -u rmvocab -f` on the tablet).
 
+**Inline vocabulary** (`inline-vocab`, `inline_poll` in `app/rmvocab.c`): the second way to learn a word,
+and the one that needs no second document. Write a word on a page of the `inline-vocab` notebook (app
+folder, a real notebook: `install_inline_notebook()`), draw a loop round it, and a flashcard is drawn onto
+that same page on a layer named after the word. `config` gains `inline=` (the document) and `idir=` (its
+page directory); `card.md` is the method, six lines (WORD, DEFINITION, MEANING, SAMPLE, TRANSLATION,
+SIMILAR) instead of `teacher.md`'s six sections. The card: the white marker paints the box opaque so it
+covers the handwriting under it, a double rounded frame wanders 1.6 px off true, and the text is filled
+with horizontal runs every 2nd pixel row for English and every 3rd for Farsi - density is the one tonal
+axis a grayscale panel keeps, colour is not. `card_text()` draws a line with the same engine the lesson
+pages use (`draw_visual`: joining, bidi) into the page buffer, then traces the ink row by row into runs and
+moves them where the card wants them, so there is one Farsi implementation, not two. The page is only ever
+appended to, so the handwriting is untouched, and the card is drawn only while the notebook is closed.
+**A card's own frame is a closed loop with ink inside it**, so without a guard the cards breed: every
+stroke carries the layer it is on (`read_page`), `inline_done` remembers which layers are ours, and a loop
+holding more than 400 strokes is not a circled word. Dry run off the tablet with `RM_FIXTURES` (a canned
+`gemini.json`), or one card alone with `RM_CARD_PAGE=<page.rm> RM_CARD_TEXT=<answer.txt> rmvocab <dir>`.
+
 **Writing `.rm` on the tablet** (`app/rmwrite.h`): a minimal v6 *writer*, so the tablet can put a
 flashcard on the page a word was circled on. A layer holds strokes and never images (the scene items are
 Line, Text, GlyphRange, Rectangle), so the card is drawn, not typeset. The framing is the one `live_strokes`

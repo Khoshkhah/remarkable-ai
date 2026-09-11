@@ -3306,9 +3306,18 @@ def install_vocab_app(host, lessons_dir, teacher_file, doc_title="Vocabulary", w
         os.chmod(out / "key", 0o600)
         if teacher_file:
             shutil.copy(teacher_file, out / "teacher.md")
+        card_file = Path(teacher_file).parent / "card.md" if teacher_file else Path("vocab/card.md")
+        if card_file.exists():                      # the flashcard method, for the inline notebook
+            shutil.copy(card_file, out / "card.md")
         if os.path.exists("/etc/localtime"):
             shutil.copy("/etc/localtime", out / "localtime")
-        (out / "config").write_text(f"doc={doc_uuid}\npdf={REMOTE_PATH}/{doc_uuid}.pdf\nwdir={REMOTE_PATH}/{words_uuid}\nwords={words_uuid}\n")
+        cfg_lines = [f"doc={doc_uuid}", f"pdf={REMOTE_PATH}/{doc_uuid}.pdf",
+                     f"wdir={REMOTE_PATH}/{words_uuid}", f"words={words_uuid}"]
+        inline_uuid = next((nb["uuid"] for nb in nbs
+                            if nb["title"].lower() == INLINE_NOTEBOOK and nb["folder"].lower() == CLOCK_FOLDER), None)
+        if inline_uuid:      # the notebook the cards are drawn into, if it has been created
+            cfg_lines += [f"inline={inline_uuid}", f"idir={REMOTE_PATH}/{inline_uuid}"]
+        (out / "config").write_text("\n".join(cfg_lines) + "\n")
         (out / "lessons").mkdir()
         have = set(run_ssh_retry(f"ls {TABLET_VOCAB_DIR}/lessons 2>/dev/null; true", host=host).split())   # SSH drops for a moment after a push
         n_local = local_lessons_for_tablet(lessons_dir, out / "lessons")

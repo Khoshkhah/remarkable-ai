@@ -31,6 +31,8 @@
 #define RETRY_S 60
 
 static char doc[64], pdfpath[600], wdir[600], words_doc[64], key[256];
+static char inline_doc[64], idir[600], icard_path[700];   /* the inline-vocab notebook: a card per circled word */
+static char *cardprompt;
 static char models[400] = "gemini-flash-latest,gemini-flash-lite-latest,gemini-3.5-flash";
 static char lessons_dir[600], inbox_dir[600], done_path[600];
 static char resp[RESP_CAP];
@@ -47,7 +49,7 @@ static char *slurp(const char *path, size_t *len) {
 
 /* ---------- the page file: strokes with their points (.rm v6, SceneLineItem blocks) ---------- */
 struct pt { float x, y; };
-struct stroke { struct pt *p; int n, tool; float x0, y0, x1, y1; };
+struct stroke { struct pt *p; int n, tool; float x0, y0, x1, y1; uint64_t layer; };
 static struct stroke *strokes; static int nstrokes, capstrokes;
 
 static void free_strokes(void) { for (int i = 0; i < nstrokes; i++) free(strokes[i].p); nstrokes = 0; }
@@ -63,7 +65,12 @@ static int read_page(const char *path) {   /* strokes on the page (display px), 
         if (e > buf + n) break;
         p += 8 + len;
         if (type != 5) continue;
-        if (!(rm_skip_tag(&b, e, 0x1F, 0) && rm_skip_tag(&b, e, 0x2F, 0) && rm_skip_tag(&b, e, 0x3F, 0) && rm_skip_tag(&b, e, 0x4F, 0) && rm_skip_tag(&b, e, 0x54, 1))) continue;
+        uint64_t layer = 0;                                   /* the parent id: which layer the stroke is on */
+        if (b < e && *b == 0x1F) {
+            b++; b++;                                         /* tag, then id part 1 */
+            for (int sh = 0; b < e; sh += 7) { layer |= (uint64_t)(*b & 0x7f) << sh; if (!(*b++ & 0x80)) break; }
+        } else continue;
+        if (!(rm_skip_tag(&b, e, 0x2F, 0) && rm_skip_tag(&b, e, 0x3F, 0) && rm_skip_tag(&b, e, 0x4F, 0) && rm_skip_tag(&b, e, 0x54, 1))) continue;
         if (!tagged(&b, e, 0x6C) || b + 5 > e) continue;   /* the item: a subblock ... */
         b += 4;
         if (*b++ != 3) continue;                              /* ... holding a line */
@@ -78,7 +85,7 @@ static int read_page(const char *path) {   /* strokes on the page (display px), 
         if (b + plen > e || np < 1) continue;
         if (nstrokes == capstrokes) { capstrokes = capstrokes ? capstrokes * 2 : 256; strokes = realloc(strokes, capstrokes * sizeof *strokes); }
         struct stroke *s = &strokes[nstrokes++];
-        s->p = malloc(np * sizeof *s->p); s->n = np; s->tool = tool;
+        s->p = malloc(np * sizeof *s->p); s->n = np; s->tool = tool; s->layer = layer;
         s->x0 = s->y0 = 1e9f; s->x1 = s->y1 = -1e9f;
         for (int i = 0; i < np; i++) {
             s->p[i].x = f32(b + i * psz) + 702; s->p[i].y = f32(b + i * psz + 4);
@@ -484,8 +491,10 @@ static void card_handy(struct rmpt *p, int n, float amp, uint32_t seed) {
         seed = seed * 1664525u + 1013904223u;
         float b = ((float)((seed >> 16) & 0xffff) / 32768.0f - 1.0f) * amp / 2;
         dx += a; dy += b;
-        if (dx > amp) dx = amp; if (dx < -amp) dx = -amp;
-        if (dy > amp) dy = amp; if (dy < -amp) dy = -amp;
+        if (dx > amp) dx = amp;
+        if (dx < -amp) dx = -amp;
+        if (dy > amp) dy = amp;
+        if (dy < -amp) dy = -amp;
         p[i].x += dx; p[i].y += dy;
     }
 }
@@ -529,8 +538,10 @@ static void card_text(const char *text, int size, int bold, int dst_x, int dst_r
     for (int y = 0; y < PH; y++) {
         const unsigned char *row = page + (size_t)y * PW;
         for (int x = 0; x < PW; x++) if (row[x] < 128) {
-            if (x < x0) x0 = x; if (x > x1) x1 = x;
-            if (y < y0) y0 = y; if (y > y1) y1 = y;
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
         }
     }
     if (x1 < 0) return;
@@ -554,12 +565,14 @@ static void card_text(const char *text, int size, int bold, int dst_x, int dst_r
 
 /* Draw the card onto `rmpath`, on a new layer named after the word. The page file is never rewritten,
  * only grown: a reader takes the blocks in order, so the layer is appended. */
+static uint64_t card_last_node;
 static int draw_card(const char *rmpath, const struct card *c, int bx, int by, int bw, int bh) {
     struct rmscan sc;
     if (!rm_scan(rmpath, &sc)) { fprintf(stderr, "not a v6 page: %s\n", rmpath); return 0; }
     memset(&card_out, 0, sizeof card_out);
     card_id = sc.max_id + 10;
     card_node = card_id++;
+    card_last_node = card_node;
     uint64_t label = card_id++, item = card_id++;
     char name[64]; snprintf(name, sizeof name, "%.60s", c->word);
     for (char *p = name; *p; p++) if (*p == '(') { while (p > name && p[-1] == ' ') p--; *p = 0; break; }
@@ -771,14 +784,24 @@ static int lesson_from_answer(const char *source) {
     fprintf(stderr, "lesson %04d '%s': %d page(s)\n", no, phrase, pages);
     return pages > 0;
 }
-static int make_lesson_from_loop(const struct stroke *loop, int *idx, int nc) {
-    float x0 = loop->x0 - 20, y0 = loop->y0 - 20; int W1 = (int)((loop->x1 - loop->x0 + 40) * 2), H1 = (int)((loop->y1 - loop->y0 + 40) * 2);
+/* the two pictures the teacher gets: the circled handwriting close up, and the whole page for context */
+static void loop_pngs(const struct stroke *loop, int *idx, int nc,
+                      unsigned char **png1, size_t *n1, unsigned char **png2, size_t *n2) {
+    float x0 = loop->x0 - 20, y0 = loop->y0 - 20;
+    int W1 = (int)((loop->x1 - loop->x0 + 40) * 2), H1 = (int)((loop->y1 - loop->y0 + 40) * 2);
     unsigned char *im1 = malloc((size_t)W1 * H1); memset(im1, 255, (size_t)W1 * H1);
     for (int i = 0; i < nc; i++) draw_stroke(im1, W1, H1, &strokes[idx[i]], x0, y0, 2, 3);
-    int W2 = PW / 2, H2 = PH / 2; unsigned char *im2 = malloc((size_t)W2 * H2); memset(im2, 255, (size_t)W2 * H2);
+    int W2 = PW / 2, H2 = PH / 2;
+    unsigned char *im2 = malloc((size_t)W2 * H2); memset(im2, 255, (size_t)W2 * H2);
     for (int i = 0; i < nstrokes; i++) if (is_ink(strokes[i].tool)) draw_stroke(im2, W2, H2, &strokes[i], 0, 0, 0.5f, 1.5f);
-    unsigned char *png1, *png2; size_t n1 = png_bytes(im1, W1, H1, &png1), n2 = png_bytes(im2, W2, H2, &png2);
+    *n1 = png_bytes(im1, W1, H1, png1);
+    *n2 = png_bytes(im2, W2, H2, png2);
     free(im1); free(im2);
+}
+
+static int make_lesson_from_loop(const struct stroke *loop, int *idx, int nc) {
+    unsigned char *png1, *png2; size_t n1, n2;
+    loop_pngs(loop, idx, nc, &png1, &n1, &png2, &n2);
     prompt_head();
     snprintf(prompt + strlen(prompt), sizeof prompt - strlen(prompt), "The learner wrote by hand on a page and drew a loop around a word or phrase. The first image is the circled handwriting: "
              "the word or phrase to teach (read it carefully; correct an obvious misspelling). The second image is the whole page: if a sentence using that word is written "
@@ -787,6 +810,104 @@ static int make_lesson_from_loop(const struct stroke *loop, int *idx, int nc) {
     free(png1); free(png2);
     return ok ? lesson_from_answer("Words") : 0;
 }
+
+/* ---- inline-vocab: a card drawn onto the page the word was circled on -------------------------
+ * Its own notebook, its own record of which loops are done (a loop lives on one page, so the page's
+ * file name is part of the signature). Nothing here touches the Words page or the Vocabulary document. */
+struct icard { struct sig s; char page[72]; unsigned long long node; };   /* node: the layer the card went on */
+static struct icard idone[512];
+static int nidone;
+
+static void isave(void) {
+    FILE *f = fopen(icard_path, "w"); if (!f) return;
+    for (int i = 0; i < nidone; i++)
+        fprintf(f, "%s %d %d %d %d %d %llu\n", idone[i].page, idone[i].s.x0, idone[i].s.y0, idone[i].s.x1, idone[i].s.y1, idone[i].s.n, idone[i].node);
+    fclose(f);
+}
+static void iload(void) {
+    FILE *f = fopen(icard_path, "r"); if (!f) return;
+    struct icard c;
+    while (nidone < 512 && fscanf(f, "%71s %d %d %d %d %d %llu", c.page, &c.s.x0, &c.s.y0, &c.s.x1, &c.s.y1, &c.s.n, &c.node) == 7)
+        idone[nidone++] = c;
+    fclose(f);
+}
+static int idone_has(const char *page, struct sig g) {
+    for (int i = 0; i < nidone; i++) if (!strcmp(idone[i].page, page) && same_sig(idone[i].s, g)) return 1;
+    return 0;
+}
+/* a card's own frame is a closed loop with ink in it, so without this the cards breed */
+static int ours(const char *page, uint64_t layer) {
+    for (int i = 0; i < nidone; i++) if (idone[i].node == layer && !strcmp(idone[i].page, page)) return 1;
+    return 0;
+}
+
+/* Where the card goes: under the loop if it fits on the page, otherwise above it. */
+static void card_box(const struct stroke *loop, int *bx, int *by, int *bw, int *bh) {
+    *bw = 1140; *bh = 560;
+    *bx = PW / 2 - *bw / 2;
+    int below = (int)loop->y1 + 46, above = (int)loop->y0 - 46 - *bh;
+    if (below + *bh <= PH - 40) *by = below;
+    else if (above >= 40) *by = above;
+    else *by = PH - 40 - *bh;
+}
+
+static int card_from_loop(const char *page_path, const struct stroke *loop, int *idx, int nc) {
+    unsigned char *png1, *png2; size_t n1, n2;
+    loop_pngs(loop, idx, nc, &png1, &n1, &png2, &n2);
+    snprintf(prompt, sizeof prompt, "%s\n\nThe learner wrote by hand on a page and drew a loop around a word or phrase. "
+             "The first image is the circled handwriting: the word or phrase to teach (read it carefully; correct an obvious "
+             "misspelling). The second image is the whole page: if a sentence using that word is written on it, use it as the "
+             "context.\n", cardprompt ? cardprompt : "Write a short English flashcard for a Farsi speaker.");
+    int ok = ask_gemini(prompt, png1, n1, png2, n2, answer, sizeof answer);
+    free(png1); free(png2);
+    if (!ok) return 0;
+    struct card c;
+    if (!parse_card(answer, &c)) { fprintf(stderr, "no WORD: in the answer\n"); return 0; }
+    int bx, by, bw, bh;
+    card_box(loop, &bx, &by, &bw, &bh);
+    return draw_card(page_path, &c, bx, by, bw, bh);
+}
+
+/* Every page of the inline notebook, while it is closed: a loop with ink in it that has no card yet
+ * gets one. The page file is only ever appended to, so the handwriting on it is untouched. */
+static void inline_poll(void) {
+    if (!inline_doc[0] || !idir[0]) return;
+    if (doc_open(inline_doc)) return;          /* never write under the page someone is looking at */
+    DIR *dp = opendir(idir); if (!dp) return;
+    struct dirent *e;
+    while ((e = readdir(dp))) {
+        size_t l = strlen(e->d_name);
+        if (l < 4 || strcmp(e->d_name + l - 3, ".rm")) continue;
+        char path[700]; snprintf(path, sizeof path, "%s/%s", idir, e->d_name);
+        if (read_page(path) < 0) continue;
+        for (int i = 0; i < nstrokes; i++) {
+            if (!is_ink(strokes[i].tool) || !is_loop(&strokes[i])) continue;
+            if (ours(e->d_name, strokes[i].layer)) continue;      /* a card's own frame is a loop too */
+            static int idx[4096];
+            int nc = content_of(&strokes[i], idx, 4096);
+            if (!nc || nc > 400) continue;                        /* a circled word is a few strokes, not a card */
+            struct sig g = sig_of(&strokes[i]);
+            time_t now = time(NULL);
+            if (idone_has(e->d_name, g) || retry_at(g) > now) continue;
+            fprintf(stderr, "inline loop at %d,%d-%d,%d on %.8s with %d strokes inside: asking Gemini\n",
+                    g.x0, g.y0, g.x1, g.y1, e->d_name, nc);
+            if (card_from_loop(path, &strokes[i], idx, nc)) {
+                if (nidone < 512) {
+                    idone[nidone].s = g; idone[nidone].node = card_last_node;
+                    snprintf(idone[nidone].page, sizeof idone[nidone].page, "%s", e->d_name);
+                    nidone++;
+                }
+                isave();
+            } else {
+                fprintf(stderr, "no card this time, trying again in %d s\n", RETRY_S);
+                set_failed(g, now + RETRY_S);
+            }
+            break;                              /* one card a round: the page has changed under us */
+        }
+    }
+    closedir(dp);
+}
+
 static void check_mark(const struct stroke *loop) {   /* a tick beside the loop: the lesson is made */
     if (!page_on_screen() || !open_device()) return;
     stroke_file("check.bin", 0, (int)loop->x1 + 12, (int)loop->y0 - 6, -1);
@@ -831,10 +952,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "config: doc=, pdf=, wdir= and words= are needed\n"); return 1;
     }
     read_kv("config", "models", models, sizeof models);
+    read_kv("config", "inline", inline_doc, sizeof inline_doc);   /* the inline-vocab notebook, optional */
+    read_kv("config", "idir", idir, sizeof idir);
     char path[700]; snprintf(path, sizeof path, "%s/key", dir);
     char *k = slurp(path, NULL); if (!k || !k[0]) { fprintf(stderr, "no Gemini key in %s\n", path); return 1; }
     k[strcspn(k, "\r\n")] = 0; snprintf(key, sizeof key, "%s", k); free(k);
     snprintf(path, sizeof path, "%s/teacher.md", dir); teacher = slurp(path, NULL);
+    snprintf(path, sizeof path, "%s/card.md", dir); cardprompt = slurp(path, NULL);
+    snprintf(icard_path, sizeof icard_path, "%s/inline_done", dir);
+    iload();
     snprintf(lessons_dir, sizeof lessons_dir, "%s/lessons", dir); snprintf(inbox_dir, sizeof inbox_dir, "%s/inbox", dir); snprintf(done_path, sizeof done_path, "%s/done", dir);
     mkdir(lessons_dir, 0755); mkdir(inbox_dir, 0755);
     https_timeout = 90;
@@ -876,6 +1002,7 @@ int main(int argc, char **argv) {
             }
         }
         inbox_poll();
+        inline_poll();
         rebuild_if_due();
         reload_if_stale();
         sleep(2);
