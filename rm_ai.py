@@ -3068,26 +3068,28 @@ def card_strokes(card, box, dark=True):
     out = []
 
     if dark:
-        # the field: marker passes closer together than the marker is wide, so it reads as one black block
-        for yy in range(int(y + 6), int(y + h - 4), 8):
-            out.append(rm_stroke([(x + 10, yy), (x + w - 10, yy)], tool=si.Pen.MARKER_2, width=3.0))
+        # the field: marker passes at a quarter of the marker's own width, so no page shows between them
+        for yy in range(int(y + 5), int(y + h - 3), 4):
+            out.append(rm_stroke([(x + 8, yy), (x + w - 8, yy)], tool=si.Pen.MARKER_2, width=4.0))
 
     out.append(rm_stroke(rounded_rect(x, y, w, h, r=34), tool=si.Pen.FINELINER_2, width=3.0,
                          color=si.PenColor.BLACK))
     out.append(rm_stroke(rounded_rect(x + 9, y + 9, w - 18, h - 18, r=28), tool=si.Pen.FINELINER_2,
                          width=1.6, color=ink))
 
-    # the two languages are told apart by tone, the only colour an e-ink tablet really has: the English
-    # at full strength, the Farsi a step back
-    soft = si.PenColor.GRAY
+    # The two languages are told apart by how densely they are filled, not by colour: a gray thin stroke
+    # on a black field is not a tone an e-ink screen can hold, but ink laid every 3rd row instead of every
+    # 2nd, with a finer pen, reads as clearly lighter and still white.
     def put(text, size, ty, kind, rtl=False):
         if not text:
             return
+        soft = kind in ("farsi", "farsi_tone")
         fp = _card_font(kind)
         tx = x + w - CARD_PAD - _text_width(text, size, font_path=fp) if rtl else x + CARD_PAD
-        c = soft if kind in ("farsi", "farsi_tone") else ink
-        for pl in text_strokes(text, size, tx, ty, pitch=CARD_PITCH, font_path=fp):
-            out.append(rm_stroke(pl, width=2.0 if dark else 1.5, color=c))
+        pitch = CARD_PITCH + 1 if soft else CARD_PITCH
+        wid = (1.5 if soft else 2.2) if dark else (1.2 if soft else 1.5)
+        for pl in text_strokes(text, size, tx, ty, pitch=pitch, font_path=fp):
+            out.append(rm_stroke(pl, width=wid, color=ink))
 
     top = y + CARD_PAD - 8
     put(card.get("word"), 76, top, "word")
@@ -3173,7 +3175,9 @@ VOCAB_PAGE = """<!doctype html><meta charset="utf-8"><title>reMarkable vocabular
 
 
 TABLET_VOCAB_DIR = "/home/root/.local/share/rmvocab"
-LESSON_FONTS = ((60, True), (34, True), (30, False), (22, False))   # title, headings, body, meta of a lesson page (app/rmvocab.c)
+LESSON_FONTS = ((60, True), (34, True), (30, False), (22, False),   # title, headings, body, meta of a lesson page
+                (76, True), (40, False), (36, False))              # the inline flashcard's word, body, footnote
+CARD_SIZES = {"word": (76, True), "body": (40, False), "small": (36, False)}   # app/rmvocab.c draws with these
 
 
 def bake_lesson_atlases(out):

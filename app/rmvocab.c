@@ -15,7 +15,9 @@
  */
 #include "stylus.h"
 #include "common.h"
+#include "rmwrite.h"
 #include <dirent.h>
+#include <math.h>
 
 #define PW 1404
 #define PH 1872
@@ -432,6 +434,156 @@ static int render_lesson(int no, const char *phrase, const char *context, const 
 }
 
 /* ---------- lessons on disk, the Vocabulary document ---------- */
+/* ---- the inline flashcard ---------------------------------------------------------------------
+ * A circled word on a page of the inline-vocab notebook gets a small card drawn onto that same page,
+ * on a layer of its own named after the word. A .rm layer holds strokes and never images, so the card
+ * is drawn: a black field of marker passes, then every glyph in white (Farsi a step back in gray),
+ * traced out of the same page buffer the lesson pages are printed into -- so the Farsi joining and the
+ * bidi ordering are the ones already on board, not a second implementation. */
+#define CARD_PITCH 2        /* pixel rows between the runs that fill a glyph: 2 reads as solid ink */
+#define CARD_PAD 52
+#define CARD_MINRUN 3
+
+struct card { char word[160], definition[300], meaning[300], sample[300], translation[300], similar[300]; };
+
+/* "KEY: value" out of the answer, one line */
+static int card_field(const char *text, const char *key, char *out, size_t cap) {
+    char pat[32]; snprintf(pat, sizeof pat, "%s:", key);
+    const char *p = strstr(text, pat);
+    if (!p || (p != text && p[-1] != '\n')) {                  /* only at the start of a line */
+        for (p = text; (p = strstr(p, pat)); p++) if (p == text || p[-1] == '\n') break;
+        if (!p) { out[0] = 0; return 0; }
+    }
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t') p++;
+    size_t i = 0;
+    while (*p && *p != '\n' && *p != '\r' && i + 1 < cap) out[i++] = *p++;
+    while (i && (out[i - 1] == ' ' || out[i - 1] == '\t')) i--;
+    out[i] = 0;
+    return i > 0;
+}
+
+static int parse_card(const char *text, struct card *c) {
+    memset(c, 0, sizeof *c);
+    card_field(text, "WORD", c->word, sizeof c->word);
+    card_field(text, "DEFINITION", c->definition, sizeof c->definition);
+    card_field(text, "MEANING", c->meaning, sizeof c->meaning);
+    card_field(text, "SAMPLE", c->sample, sizeof c->sample);
+    card_field(text, "TRANSLATION", c->translation, sizeof c->translation);
+    card_field(text, "SIMILAR", c->similar, sizeof c->similar);
+    return c->word[0] != 0;
+}
+
+/* the clock's frame shape */
+static int card_rounded(struct rmpt *out, float x, float y, float w, float h, float r) {
+    static const float a0[4] = {-90, 0, 90, 180};
+    const float cx[4] = {x + w - r, x + w - r, x + r, x + r}, cy[4] = {y + r, y + h - r, y + h - r, y + r};
+    int n = 0;
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < 7; i++) {
+            float a = (a0[k] + 90.0f * i / 6) * (float)M_PI / 180.0f;
+            out[n].x = cx[k] + r * cosf(a); out[n].y = cy[k] + r * sinf(a); n++;
+        }
+    out[n] = out[0]; n++;
+    return n;
+}
+
+static uint64_t card_id, card_prev, card_node;
+static struct rmbuf card_out;
+
+static void card_emit(const struct rmpt *p, int n, int tool, float width, int color) {
+    rm_line_c(&card_out, card_node, card_id, card_prev, p, n, tool, width, color);
+    card_prev = card_id++;
+}
+
+/* One line of text: drawn into the page buffer with the engine the lesson pages use, then the ink is
+ * traced row by row into horizontal runs and moved to where the card wants it. */
+static void card_text(const char *text, int size, int bold, int dst_x, int dst_right, int dst_top, int pitch, float pen) {
+    static uint32_t cp[MAXCP];
+    if (!text || !*text) return;
+    int n = decode(text, cp, MAXCP);
+    if (n <= 0) return;
+    struct uatlas *a = ufont(size, bold);
+    if (!a) { fprintf(stderr, "no atlas for %d%s\n", size, bold ? "b" : "r"); return; }
+    int rtl = is_rtl(cp, n);
+    page_new();
+    draw_visual(a, cp, n, rtl, PH / 2, 0, 0);
+    int x0 = PW, x1 = -1, y0 = PH, y1 = -1;
+    for (int y = 0; y < PH; y++) {
+        const unsigned char *row = page + (size_t)y * PW;
+        for (int x = 0; x < PW; x++) if (row[x] < 128) {
+            if (x < x0) x0 = x; if (x > x1) x1 = x;
+            if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+    }
+    if (x1 < 0) return;
+    float dx = (float)(rtl ? dst_right - x1 : dst_x - x0), dy = (float)(dst_top - y0);
+    for (int y = y0; y <= y1; y += pitch) {
+        const unsigned char *row = page + (size_t)y * PW;
+        int run = -1;
+        for (int x = x0; x <= x1 + 1; x++) {
+            int dark = x <= x1 && row[x] < 128;
+            if (dark && run < 0) run = x;
+            else if (!dark && run >= 0) {
+                if (x - run >= CARD_MINRUN) {
+                    struct rmpt p[2] = {{run + dx, y + dy}, {x - 1 + dx, y + dy}};
+                    card_emit(p, 2, RM_PEN_FINELINER, pen, RM_COLOR_WHITE);
+                }
+                run = -1;
+            }
+        }
+    }
+}
+
+/* Draw the card onto `rmpath`, on a new layer named after the word. The page file is never rewritten,
+ * only grown: a reader takes the blocks in order, so the layer is appended. */
+static int draw_card(const char *rmpath, const struct card *c, int bx, int by, int bw, int bh) {
+    struct rmscan sc;
+    if (!rm_scan(rmpath, &sc)) { fprintf(stderr, "not a v6 page: %s\n", rmpath); return 0; }
+    memset(&card_out, 0, sizeof card_out);
+    card_id = sc.max_id + 10;
+    card_node = card_id++;
+    uint64_t label = card_id++, item = card_id++;
+    char name[64]; snprintf(name, sizeof name, "%.60s", c->word);
+    for (char *p = name; *p; p++) if (*p == '(') { while (p > name && p[-1] == ' ') p--; *p = 0; break; }
+    rm_layer(&card_out, card_node, label, name, sc.root, item, sc.last_child);
+    card_prev = 0;
+
+    struct rmpt pts[64];
+    for (int y = by + 5; y < by + bh - 3; y += 4) {          /* the field: passes at a quarter of the marker's width */
+        pts[0].x = (float)(bx + 8); pts[0].y = (float)y;
+        pts[1].x = (float)(bx + bw - 8); pts[1].y = (float)y;
+        card_emit(pts, 2, RM_PEN_MARKER, 4.0f, RM_COLOR_BLACK);
+    }
+    int n = card_rounded(pts, (float)bx, (float)by, (float)bw, (float)bh, 34);
+    card_emit(pts, n, RM_PEN_FINELINER, 3.0f, RM_COLOR_BLACK);
+    n = card_rounded(pts, bx + 9.0f, by + 9.0f, bw - 18.0f, bh - 18.0f, 28);
+    card_emit(pts, n, RM_PEN_FINELINER, 1.6f, RM_COLOR_WHITE);
+
+    int left = bx + CARD_PAD, right = bx + bw - CARD_PAD, top = by + CARD_PAD - 8;
+    card_text(c->word,        76, 1, left, right, top,       CARD_PITCH,     2.2f);
+    card_text(c->definition,  40, 0, left, right, top + 116,  CARD_PITCH,     2.2f);
+    card_text(c->meaning,     40, 0, left, right, top + 172,  CARD_PITCH + 1, 1.5f);
+    int rule = top + 236;
+    pts[0].x = (float)left; pts[0].y = (float)rule; pts[1].x = (float)right; pts[1].y = (float)rule;
+    card_emit(pts, 2, RM_PEN_FINELINER, 1.2f, RM_COLOR_WHITE);
+    card_text(c->sample,      40, 0, left, right, rule + 30,  CARD_PITCH,     2.2f);
+    card_text(c->translation, 40, 0, left, right, rule + 86,  CARD_PITCH + 1, 1.5f);
+    if (c->similar[0]) {
+        char s[320]; snprintf(s, sizeof s, "~ %s", c->similar);
+        card_text(s,          36, 0, left, right, rule + 150, CARD_PITCH + 1, 1.5f);
+    }
+
+    FILE *f = fopen(rmpath, "ab");
+    if (!f) { perror(rmpath); rb_free(&card_out); return 0; }
+    size_t wrote = fwrite(card_out.p, 1, card_out.n, f);
+    fclose(f);
+    fprintf(stderr, "card '%s' drawn on %s: %llu strokes, %zu bytes appended\n", name, rmpath,
+            (unsigned long long)(card_id - sc.max_id - 13), wrote);
+    rb_free(&card_out);
+    return wrote == card_out.n || wrote > 0;
+}
+
 static int cmp_name(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 static int list_suffix(const char *d, const char *suffix, char (*names)[64], int max) {   /* sorted names ending in suffix */
     DIR *dp = opendir(d); if (!dp) return 0;
@@ -640,6 +792,16 @@ static void inbox_poll(void) {   /* lookups from the PC: phrase, context, source
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: rmvocab <dir> [xochitl.conf] [event device]\n"); return 1; }
     strncpy(dir, argv[1], sizeof dir - 1);
+    /* dry run, off the tablet: draw one card from a saved answer onto a page and stop, so the layout
+     * can be looked at with rmscene and render_rm_to_png before any of it runs for real.
+     *   RM_CARD_PAGE=<page.rm> RM_CARD_TEXT=<answer.txt> rmvocab <dir with the atlases> */
+    const char *cp_page = getenv("RM_CARD_PAGE"), *cp_text = getenv("RM_CARD_TEXT");
+    if (cp_page && cp_text) {
+        size_t n; char *t = slurp(cp_text, &n);
+        struct card c;
+        if (!t || !parse_card(t, &c)) { fprintf(stderr, "no WORD: in %s\n", cp_text); return 1; }
+        return draw_card(cp_page, &c, 130, 240, 1140, 560) ? 0 : 1;
+    }
     parse_dev_args(argc, argv);
     if (!read_kv("config", "doc", doc, sizeof doc) || !read_kv("config", "pdf", pdfpath, sizeof pdfpath) || !read_kv("config", "wdir", wdir, sizeof wdir) || !read_kv("config", "words", words_doc, sizeof words_doc)) {
         fprintf(stderr, "config: doc=, pdf=, wdir= and words= are needed\n"); return 1;
