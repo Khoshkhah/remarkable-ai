@@ -170,8 +170,9 @@ clock). The page: `render_dash_pages()` renders JPEG templates for the next `DAS
 (`render_dashboard_image(live=True, pen_weather=True, now=day)`: everything printed except the weather
 values); rmdash's `compose_page()` writes a one-page PDF (the JPEG as a DCTDecode XObject plus the
 weather block as Helvetica text in the sleep screen's layout, `weather_block()`) and
-`swap_daily_page()` puts it over the document's PDF and restarts xochitl at a moment the restart costs
-nothing (`may_restart()`), on a new day or when the printed weather is over 6 h old; the first push is the
+`swap_daily_page()` puts it over the document's PDF on a new day or when the printed weather is over 6 h
+old - silently while the page is closed (xochitl reads a document from disk when it opens it), and only
+with a restart, at a `may_restart()` moment, when the page is on screen and nothing else can show it; the first push is the
 PC's full page. The pen strokes live in the `.rm` and survive the swap; the PC's standby cron tops the
 template stock up (`top_up_dash_pages`, no reload). The sleep screen: `render_sleep_backgrounds()` renders
 the standby template with `stamp=True` (header text, weather values, usage rows and the footer time

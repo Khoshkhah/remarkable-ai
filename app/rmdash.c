@@ -502,14 +502,19 @@ static void swap_daily_page(void) {
     long printed_at = 0; char pday[16] = ""; sscanf(printed, "%15s %ld", pday, &printed_at);
     int new_day = strcmp(pday, today) != 0, stale = wx.ok && now - printed_at > 6 * 3600 && wx.at > printed_at;
     if (!pdf[0] || (!new_day && !stale)) return;
-    if (!may_restart()) return;                       /* between documents, or with the screen off: the restart reloads what is open */
+    /* With the page closed the file is simply swapped: xochitl reads a document from disk when it opens
+     * it, so the new day is there the next time the user looks, with nothing reloaded. Only a page that is
+     * on screen needs the restart, and that waits for a moment it costs nothing. */
+    int on_screen = doc_open(doc);
+    if (on_screen && !may_restart()) return;
     snprintf(src, sizeof src, "%s/pages/%s.jpg", dir, today);
     if (access(src, R_OK)) { static int said = 0; if (!said++) fprintf(stderr, "no printed page for %s in the stock\n", today); return; }
     snprintf(tmp, sizeof tmp, "%s.new", pdf);
     if (!compose_page(src, tmp) || rename(tmp, pdf)) { fprintf(stderr, "could not compose the page for %s\n", today); return; }
     f = fopen(ppath, "w"); if (f) { fprintf(f, "%s %ld\n", today, (long)now); fclose(f); }
-    fprintf(stderr, "printed page for %s composed (%s), restarting xochitl\n", today, new_day ? "new day" : "fresh weather");
-    restart_xochitl();
+    fprintf(stderr, "printed page for %s composed (%s), %s\n", today, new_day ? "new day" : "fresh weather",
+            on_screen ? "restarting xochitl" : "nothing reloaded: xochitl reads it when the page is opened");
+    if (on_screen) restart_xochitl();
 }
 
 
